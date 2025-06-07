@@ -108,6 +108,54 @@ def parse_digit_set(digit_string: str) -> Set[str]:
     return digits
 
 
+def generate_output_filename(
+    max_value: int,
+    min_value: int = 0,
+    allowed_digits: Set[str] = None,
+    include_addition: bool = True,
+    include_subtraction: bool = True,
+    max_expressions: int = None,
+    output_dir: str = "datasets"
+) -> str:
+    """Generate descriptive filename based on parameters."""
+    
+    parts = ["ds-calcgpt"]
+    
+    # Add min and max values
+    parts.append(f"min{min_value}")
+    parts.append(f"max{max_value}")
+    
+    # Add digit constraints
+    if allowed_digits:
+        # Sort digits to ensure consistent naming
+        sorted_digits = sorted([int(d) for d in allowed_digits])
+        
+        # Check if it's a continuous range
+        if len(sorted_digits) > 1 and sorted_digits == list(range(sorted_digits[0], sorted_digits[-1] + 1)):
+            parts.append(f"ds{sorted_digits[0]}_de{sorted_digits[-1]}")
+        else:
+            # Individual digits
+            digits_str = "_".join(str(d) for d in sorted_digits)
+            parts.append(f"digits{digits_str}")
+    else:
+        parts.append("alldigits")
+    
+    # Add operation type
+    if include_addition and include_subtraction:
+        parts.append("all")
+    elif include_addition:
+        parts.append("add")
+    elif include_subtraction:
+        parts.append("sub")
+    
+    # Add max expressions if specified
+    if max_expressions:
+        parts.append(f"limit{max_expressions}")
+    
+    filename = "_".join(parts) + ".txt"
+    return str(Path(output_dir) / filename)
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -115,10 +163,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s -o data/simple.txt -m 10
-  %(prog)s -o data/filtered.txt -m 50 -d "1,2,3"
-  %(prog)s -o data/range.txt -m 100 -d "1-5" --min-value 1
-  %(prog)s -o data/addition_only.txt -m 20 --no-subtraction
+  %(prog)s -m 10                                    # Auto-generates: datasets/ds-calcgpt_min0_max10_alldigits_all.txt
+  %(prog)s -o data/simple.txt -m 10                 # Manual filename with max 10
+  %(prog)s -m 50 -d "1,2,3"                        # Auto-generates: datasets/ds-calcgpt_min0_max50_digits1_2_3_all.txt
+  %(prog)s -m 100 -d "1-5" --min-value 1           # Auto-generates: datasets/ds-calcgpt_min1_max100_ds1_de5_all.txt
+  %(prog)s -m 20 --no-subtraction                   # Auto-generates: datasets/ds-calcgpt_min0_max20_alldigits_add.txt
+  %(prog)s -o data/custom.txt -m 1000 --max-expressions 500  # Manual filename with limit
         """
     )
     
@@ -126,8 +176,8 @@ Examples:
     parser.add_argument(
         '-o', '--output',
         type=Path,
-        required=True,
-        help='Output file path'
+        required=False,
+        help='Output file path (if not specified, will be auto-generated based on parameters)'
     )
     
     # Optional arguments
@@ -208,9 +258,25 @@ Examples:
         print(f"  Allowed digits: {sorted(allowed_digits) if allowed_digits else 'all'}")
         print(f"  Include addition: {not args.no_addition}")
         print(f"  Include subtraction: {not args.no_subtraction}")
-        print(f"  Output file: {args.output}")
         if args.max_expressions:
             print(f"  Max expressions: {args.max_expressions}")
+    
+    # Generate output filename if not provided
+    if args.output is None:
+        output_filename = generate_output_filename(
+            max_value=args.max_value,
+            min_value=args.min_value,
+            allowed_digits=allowed_digits,
+            include_addition=not args.no_addition,
+            include_subtraction=not args.no_subtraction,
+            max_expressions=args.max_expressions
+        )
+        output_path = Path(output_filename)
+    else:
+        output_path = args.output
+    
+    if args.verbose:
+        print(f"  Final output file: {output_path}")
     
     try:
         # Generate expressions
@@ -225,11 +291,11 @@ Examples:
         # Write to file
         count = write_expressions_to_file(
             expressions,
-            args.output,
+            output_path,
             args.max_expressions
         )
         
-        print(f"Generated {count} expressions and saved to {args.output}")
+        print(f"Generated {count} expressions and saved to {output_path}")
         
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
