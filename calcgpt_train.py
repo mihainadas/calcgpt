@@ -172,7 +172,7 @@ Examples:
     parser.add_argument(
         '--save-steps',
         type=int,
-        default=1000,
+        default=5000,
         help='Model save frequency (default: 1000)'
     )
     
