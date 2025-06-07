@@ -1,7 +1,7 @@
 """
-CalcGPT Training Library
+CalcGPT Library
 
-Core training functionality for CalcGPT models.
+Core functionality for CalcGPT models including training, dataset generation, inference, and evaluation.
 """
 
 from .train import (
@@ -29,6 +29,25 @@ from .dategen import (
     get_file_stats
 )
 
+from .inference import (
+    CalcGPT,
+    InferenceConfig,
+    get_device,
+    find_latest_model,
+    get_model_path,
+    load_vocabulary_from_dataset,
+    validate_simple_arithmetic
+)
+
+from .evaluation import (
+    CalcGPTEvaluator,
+    EvaluationConfig,
+    load_evaluation_dataset,
+    create_test_cases,
+    validate_completion,
+    calculate_metrics
+)
+
 __version__ = "1.0.0"
 __all__ = [
     # Training exports
@@ -51,5 +70,20 @@ __all__ = [
     "parse_digit_set",
     "generate_output_filename",
     "parse_filename_parameters",
-    "get_file_stats"
+    "get_file_stats",
+    # Inference exports
+    "CalcGPT",
+    "InferenceConfig",
+    "get_device",
+    "find_latest_model",
+    "get_model_path",
+    "load_vocabulary_from_dataset",
+    "validate_simple_arithmetic",
+    # Evaluation exports
+    "CalcGPTEvaluator",
+    "EvaluationConfig",
+    "load_evaluation_dataset",
+    "create_test_cases",
+    "validate_completion",
+    "calculate_metrics"
 ] 

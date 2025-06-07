@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 """
-CalcGPT Evaluation Tool - Comprehensive model assessment CLI
+CalcGPT Evaluation Tool - CLI Interface
 
-A powerful command-line interface for evaluating CalcGPT models on arithmetic tasks.
+A command-line interface for evaluating CalcGPT models on arithmetic tasks.
 Provides detailed accuracy metrics, completion analysis, and performance benchmarks.
 
 Author: Mihai NADAS
-Version: 1.0.0
+Version: 2.0.0
 """
 
 import argparse
-import os
 import sys
 import json
-import time
-import torch
-import re
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple, Any
-from transformers import GPT2LMHeadModel, GPT2Config
 from datetime import datetime
-from collections import defaultdict
-import math
+from typing import List, Dict, Any
+
+from lib.evaluation import CalcGPTEvaluator, EvaluationConfig
+from lib.inference import get_model_path
 
 # ANSI color codes for beautiful output
 class Colors:
@@ -35,313 +31,6 @@ class Colors:
     BOLD = '\033[1m'
     UNDERLINE = '\033[4m'
 
-class CalcGPTEvaluator:
-    """CalcGPT model evaluator"""
-    
-    def __init__(self, model_path: str, device: str = 'auto', verbose: bool = False):
-        self.model_path = Path(model_path)
-        self.device = self._get_device(device)
-        self.verbose = verbose
-        self.model = None
-        self.vocab = None
-        self.id2char = None
-        self.maxlen = None
-        
-        # Load model and vocabulary
-        self._load_model()
-        self._load_vocabulary()
-        
-    def _get_device(self, device: str) -> torch.device:
-        """Get the appropriate device for inference"""
-        if device == 'auto':
-            if torch.cuda.is_available():
-                return torch.device('cuda')
-            elif torch.backends.mps.is_available():
-                return torch.device('mps')
-            else:
-                return torch.device('cpu')
-        else:
-            return torch.device(device)
-    
-    def _load_model(self):
-        """Load the trained model"""
-        if self.verbose:
-            print(f"{Colors.CYAN}Loading model from: {self.model_path}{Colors.ENDC}")
-        
-        try:
-            if self.model_path.exists():
-                # Check for model files
-                model_files = list(self.model_path.glob("*.bin")) + list(self.model_path.glob("*.safetensors"))
-                
-                if model_files:
-                    self.model = GPT2LMHeadModel.from_pretrained(str(self.model_path))
-                else:
-                    # Try to find checkpoint directories
-                    checkpoints = [d for d in self.model_path.iterdir() if d.is_dir() and d.name.startswith('checkpoint')]
-                    if checkpoints:
-                        # Use the latest checkpoint
-                        latest_checkpoint = max(checkpoints, key=lambda x: int(x.name.split('-')[1]))
-                        if self.verbose:
-                            print(f"{Colors.WARNING}Using checkpoint: {latest_checkpoint}{Colors.ENDC}")
-                        self.model = GPT2LMHeadModel.from_pretrained(str(latest_checkpoint))
-                    else:
-                        raise FileNotFoundError("No model files found in directory")
-            else:
-                raise FileNotFoundError(f"Model path does not exist: {self.model_path}")
-                
-            self.model.to(self.device)
-            self.model.eval()
-            
-            if self.verbose:
-                total_params = sum(p.numel() for p in self.model.parameters())
-                print(f"{Colors.GREEN}✅ Model loaded successfully!")
-                print(f"   Parameters: {total_params:,}")
-                print(f"   Device: {self.device}{Colors.ENDC}")
-                
-        except Exception as e:
-            print(f"{Colors.FAIL}❌ Error loading model: {e}{Colors.ENDC}")
-            sys.exit(1)
-    
-    def _load_vocabulary(self):
-        """Load vocabulary from dataset"""
-        dataset_path = Path('datasets/ds-calcgpt.txt')
-        
-        if not dataset_path.exists():
-            print(f"{Colors.FAIL}❌ Dataset file not found: {dataset_path}")
-            print(f"   Please ensure the dataset file exists for vocabulary loading.{Colors.ENDC}")
-            sys.exit(1)
-            
-        try:
-            with open(dataset_path) as f:
-                examples = [line.strip() for line in f if line.strip()]
-            
-            # Recreate the same vocabulary used during training
-            special_tokens = ['<pad>', '<eos>']
-            chars = sorted(set(''.join(examples)))
-            self.vocab = {c: i for i, c in enumerate(special_tokens + chars)}
-            self.id2char = {i: c for c, i in self.vocab.items()}
-            self.maxlen = max(len(self.encode(x)) for x in examples)
-            
-            if self.verbose:
-                print(f"{Colors.GREEN}✅ Vocabulary loaded:")
-                print(f"   Vocab size: {len(self.vocab)}")
-                print(f"   Max length: {self.maxlen}")
-                print(f"   Vocabulary: {self.vocab}{Colors.ENDC}")
-                
-        except Exception as e:
-            print(f"{Colors.FAIL}❌ Error loading vocabulary: {e}{Colors.ENDC}")
-            sys.exit(1)
-    
-    def encode(self, s: str) -> List[int]:
-        """Encode string to token IDs"""
-        return [self.vocab[c] for c in s if c in self.vocab] + [self.vocab['<eos>']]
-    
-    def decode(self, ids: List[int]) -> str:
-        """Decode token IDs to string"""
-        return ''.join([self.id2char[i] for i in ids if i != self.vocab['<pad>'] and i != self.vocab['<eos>']])
-    
-    def complete_expression(self, partial_expr: str, max_tokens: int = 15) -> Dict[str, Any]:
-        """Complete a partial arithmetic expression"""
-        start_time = time.time()
-        
-        # Clean input
-        partial_expr = partial_expr.strip()
-        
-        # Encode input (remove EOS for generation)
-        input_tokens = self.encode(partial_expr)[:-1]
-        input_ids = torch.tensor([input_tokens], dtype=torch.long).to(self.device)
-        
-        try:
-            with torch.no_grad():
-                generated = self.model.generate(
-                    input_ids,
-                    max_length=len(input_tokens) + max_tokens,
-                    do_sample=False,  # Greedy for consistent evaluation
-                    pad_token_id=self.vocab['<pad>'],
-                    eos_token_id=self.vocab['<eos>'],
-                    bad_words_ids=[[self.vocab['<pad>']]],  # Prevent padding
-                    num_return_sequences=1
-                )
-            
-            result_tokens = generated[0].tolist()
-            completion = self.decode(result_tokens)
-            
-            # Calculate timing
-            inference_time = time.time() - start_time
-            
-            return {
-                'input': partial_expr,
-                'completion': completion,
-                'inference_time': inference_time,
-                'input_tokens': input_tokens,
-                'output_tokens': result_tokens,
-                'success': True
-            }
-            
-        except Exception as e:
-            return {
-                'input': partial_expr,
-                'completion': '',
-                'inference_time': time.time() - start_time,
-                'error': str(e),
-                'success': False
-            }
-
-def load_evaluation_dataset(dataset_path: str) -> List[str]:
-    """Load the evaluation dataset"""
-    try:
-        with open(dataset_path, 'r') as f:
-            equations = [line.strip() for line in f if line.strip()]
-        return equations
-    except Exception as e:
-        print(f"{Colors.FAIL}❌ Error loading dataset: {e}{Colors.ENDC}")
-        sys.exit(1)
-
-def create_test_cases(equations: List[str]) -> List[Dict[str, str]]:
-    """Create test cases from full equations"""
-    test_cases = []
-    
-    for equation in equations:
-        if '=' in equation:
-            parts = equation.split('=')
-            if len(parts) == 2:
-                left_side = parts[0].strip()
-                full_equation = equation
-                
-                # Create different types of test cases
-                test_cases.extend([
-                    # Complete from just the first operand
-                    {'input': left_side.split('+')[0] if '+' in left_side else left_side.split('-')[0] if '-' in left_side else left_side,
-                     'expected': full_equation,
-                     'type': 'first_operand'},
-                    
-                    # Complete from the operation without equals
-                    {'input': left_side,
-                     'expected': full_equation,
-                     'type': 'expression_complete'},
-                    
-                    # Complete from partial equation
-                    {'input': left_side + '=',
-                     'expected': full_equation,
-                     'type': 'answer_complete'}
-                ])
-    
-    return test_cases
-
-def validate_completion(test_case: Dict[str, str], completion: str) -> Dict[str, Any]:
-    """Validate if a completion is correct"""
-    input_text = test_case['input']
-    expected = test_case['expected']
-    test_type = test_case['type']
-    
-    result = {
-        'valid_format': False,
-        'correct_arithmetic': False,
-        'complete_expression': False,
-        'exact_match': False,
-        'contains_input': False,
-        'details': {}
-    }
-    
-    # Check if completion contains the input
-    result['contains_input'] = input_text in completion
-    
-    # Check if it's a valid arithmetic expression format
-    arithmetic_pattern = r'^\d+[\+\-]\d+=\d+$'
-    result['valid_format'] = bool(re.match(arithmetic_pattern, completion))
-    
-    # Check if it's a complete expression (has = and result)
-    result['complete_expression'] = '=' in completion and len(completion.split('=')) == 2
-    
-    if result['complete_expression']:
-        parts = completion.split('=')
-        if len(parts) == 2:
-            try:
-                left_side = parts[0].strip()
-                right_side = parts[1].strip()
-                
-                # Evaluate the left side
-                if '+' in left_side:
-                    operands = left_side.split('+')
-                    if len(operands) == 2:
-                        expected_result = int(operands[0]) + int(operands[1])
-                        actual_result = int(right_side)
-                        result['correct_arithmetic'] = expected_result == actual_result
-                        result['details']['expected_result'] = expected_result
-                        result['details']['actual_result'] = actual_result
-                        
-                elif '-' in left_side:
-                    operands = left_side.split('-')
-                    if len(operands) == 2:
-                        expected_result = int(operands[0]) - int(operands[1])
-                        actual_result = int(right_side)
-                        result['correct_arithmetic'] = expected_result == actual_result
-                        result['details']['expected_result'] = expected_result
-                        result['details']['actual_result'] = actual_result
-                        
-            except (ValueError, IndexError):
-                result['correct_arithmetic'] = False
-    
-    # Check exact match
-    result['exact_match'] = completion.strip() == expected.strip()
-    
-    return result
-
-def calculate_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Calculate comprehensive evaluation metrics"""
-    total = len(results)
-    if total == 0:
-        return {}
-    
-    metrics = {
-        'total_tests': total,
-        'successful_completions': sum(1 for r in results if r['completion_result']['success']),
-        'valid_format': sum(1 for r in results if r['validation']['valid_format']),
-        'correct_arithmetic': sum(1 for r in results if r['validation']['correct_arithmetic']),
-        'complete_expressions': sum(1 for r in results if r['validation']['complete_expression']),
-        'exact_matches': sum(1 for r in results if r['validation']['exact_match']),
-        'contains_input': sum(1 for r in results if r['validation']['contains_input']),
-    }
-    
-    # Calculate percentages
-    for key in ['successful_completions', 'valid_format', 'correct_arithmetic', 
-                'complete_expressions', 'exact_matches', 'contains_input']:
-        metrics[f'{key}_pct'] = (metrics[key] / total) * 100
-    
-    # Calculate by test type
-    by_type = defaultdict(lambda: defaultdict(int))
-    for result in results:
-        test_type = result['test_case']['type']
-        by_type[test_type]['total'] += 1
-        if result['validation']['correct_arithmetic']:
-            by_type[test_type]['correct'] += 1
-        if result['validation']['valid_format']:
-            by_type[test_type]['valid_format'] += 1
-    
-    metrics['by_type'] = dict(by_type)
-    
-    # Calculate timing statistics
-    times = [r['completion_result']['inference_time'] for r in results if r['completion_result']['success']]
-    if times:
-        try:
-            import statistics
-            metrics['timing'] = {
-                'mean_ms': statistics.mean(times) * 1000,
-                'median_ms': statistics.median(times) * 1000,
-                'min_ms': min(times) * 1000,
-                'max_ms': max(times) * 1000,
-            }
-            if len(times) > 1:
-                metrics['timing']['std_ms'] = statistics.stdev(times) * 1000
-        except ImportError:
-            metrics['timing'] = {
-                'mean_ms': sum(times) / len(times) * 1000,
-                'min_ms': min(times) * 1000,
-                'max_ms': max(times) * 1000
-            }
-    
-    return metrics
-
 def print_banner():
     """Print the evaluation tool banner"""
     banner = f"""
@@ -349,27 +38,37 @@ def print_banner():
 ╔═══════════════════════════════════════════════════════════════╗
 ║                        CalcGPT Eval                          ║
 ║                   Model Evaluation Tool                      ║
-║                         v1.0.0                               ║
+║                         v2.0.0                               ║
 ╚═══════════════════════════════════════════════════════════════╝
 {Colors.ENDC}"""
     print(banner)
 
-def run_evaluation(evaluator: CalcGPTEvaluator, test_cases: List[Dict[str, str]], 
-                  max_tokens: int, verbose: bool) -> List[Dict[str, Any]]:
-    """Run the evaluation on all test cases"""
-    results = []
+def create_config_from_args(args) -> EvaluationConfig:
+    """Create EvaluationConfig from command line arguments"""
+    return EvaluationConfig(
+        max_tokens=args.max_tokens,
+        device=args.device,
+        sample_size=args.sample,
+        verbose=args.verbose
+    )
+
+def run_evaluation_with_progress(evaluator: CalcGPTEvaluator, test_cases: List[Dict[str, str]], 
+                                verbose: bool) -> List[Dict[str, Any]]:
+    """Run the evaluation with progress display"""
     total = len(test_cases)
-    
     print(f"\n{Colors.GREEN}🧪 Running evaluation on {total} test cases{Colors.ENDC}")
+    
+    results = []
     
     for i, test_case in enumerate(test_cases, 1):
         if not verbose:
             print(f"\r{Colors.CYAN}Progress: {i}/{total} ({i/total*100:.1f}%){Colors.ENDC}", end='', flush=True)
         
         # Get model completion
-        completion_result = evaluator.complete_expression(test_case['input'], max_tokens)
+        completion_result = evaluator.complete_expression(test_case['input'])
         
         # Validate the completion
+        from lib.evaluation import validate_completion
         validation = validate_completion(test_case, completion_result['completion'])
         
         result = {
@@ -432,7 +131,7 @@ def save_results(results: List[Dict[str, Any]], metrics: Dict[str, Any],
             'model_path': model_path,
             'evaluation_timestamp': datetime.now().isoformat(),
             'total_test_cases': len(results),
-            'evaluator_version': '1.0.0'
+            'evaluator_version': '2.0.0'
         },
         'metrics': metrics,
         'detailed_results': results
@@ -444,47 +143,6 @@ def save_results(results: List[Dict[str, Any]], metrics: Dict[str, Any],
         print(f"\n{Colors.GREEN}📄 Detailed results saved to: {output_file}{Colors.ENDC}")
     except Exception as e:
         print(f"{Colors.FAIL}❌ Error saving results: {e}{Colors.ENDC}")
-
-def find_latest_model(models_dir: str = "models") -> Optional[str]:
-    """Find the latest trained model in the models directory"""
-    models_path = Path(models_dir)
-    
-    if not models_path.exists():
-        return None
-    
-    # Find all calcgpt model directories
-    model_dirs = [d for d in models_path.iterdir() 
-                  if d.is_dir() and d.name.startswith('calcgpt')]
-    
-    if not model_dirs:
-        return None
-    
-    # Sort by modification time (most recent first)
-    model_dirs.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-    
-    # Return the most recently modified model
-    return str(model_dirs[0])
-
-def get_model_path(specified_path: Optional[str]) -> str:
-    """Get the model path, using auto-detection if not specified"""
-    if specified_path and specified_path != 'auto':
-        return specified_path
-    
-    # Try to find latest model in models directory
-    latest_model = find_latest_model()
-    if latest_model:
-        return latest_model
-    
-    # Fallback to legacy out directory
-    if Path('./out').exists():
-        return './out'
-    
-    # If nothing found, show helpful error
-    raise FileNotFoundError(
-        "No trained models found. Please:\n"
-        "  1. Train a model using: python calcgpt_train.py\n"
-        "  2. Or specify a model path with: -m /path/to/model"
-    )
 
 def main():
     parser = argparse.ArgumentParser(
@@ -527,59 +185,64 @@ Examples:
     # Utility options
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose output with individual test results')
-    parser.add_argument('--version', action='version', version='CalcGPT Eval 1.0.0')
-    parser.add_argument('--no-banner', action='store_true',
-                       help='Suppress banner output')
+    parser.add_argument('--version', action='version', version='CalcGPT Eval 2.0.0')
+    parser.add_argument('--quiet', action='store_true',
+                       help='Suppress banner and verbose output')
     
     args = parser.parse_args()
     
     # Print banner unless suppressed
-    if not args.no_banner:
+    if not args.quiet:
         print_banner()
     
     # Get model path
     try:
         model_path = get_model_path(args.model)
-        if args.verbose or args.model == 'auto':
+        if not args.quiet:
             if args.model == 'auto':
                 print(f"{Colors.GREEN}🎯 Auto-detected model: {Colors.CYAN}{Path(model_path).name}{Colors.ENDC}")
             else:
                 print(f"{Colors.CYAN}📁 Using model: {model_path}{Colors.ENDC}")
     except FileNotFoundError as e:
         print(f"{Colors.FAIL}❌ {e}{Colors.ENDC}")
-        sys.exit(1)
+        return 1
+    
+    # Create configuration
+    config = create_config_from_args(args)
+    config.verbose = args.verbose and not args.quiet
     
     # Initialize evaluator
-    if args.verbose:
+    if not args.quiet:
         print(f"{Colors.CYAN}Initializing CalcGPT evaluator...{Colors.ENDC}")
     
-    evaluator = CalcGPTEvaluator(model_path, args.device, args.verbose)
+    try:
+        evaluator = CalcGPTEvaluator(model_path, config, verbose=not args.quiet)
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ Error initializing evaluator: {e}{Colors.ENDC}")
+        return 1
     
-    # Load evaluation dataset
-    if args.verbose:
+    # Load evaluation dataset and run evaluation
+    if not args.quiet:
         print(f"{Colors.CYAN}Loading evaluation dataset: {args.dataset}{Colors.ENDC}")
     
-    equations = load_evaluation_dataset(args.dataset)
-    print(f"{Colors.GREEN}✅ Loaded {len(equations)} equations from dataset{Colors.ENDC}")
-    
-    # Create test cases
-    test_cases = create_test_cases(equations)
-    print(f"{Colors.GREEN}✅ Generated {len(test_cases)} test cases{Colors.ENDC}")
-    
-    # Sample if requested
-    if args.sample and args.sample < len(test_cases):
-        import random
-        test_cases = random.sample(test_cases, args.sample)
-        print(f"{Colors.WARNING}📝 Using random sample of {len(test_cases)} test cases{Colors.ENDC}")
-    
-    # Run evaluation
-    results = run_evaluation(evaluator, test_cases, args.max_tokens, args.verbose)
-    
-    # Calculate metrics
-    metrics = calculate_metrics(results)
+    try:
+        # Use the evaluator's built-in dataset evaluation method
+        results, metrics = evaluator.evaluate_dataset(args.dataset)
+        
+        if not args.quiet:
+            equations_count = len(set(r['test_case']['expected'] for r in results))
+            print(f"{Colors.GREEN}✅ Loaded {equations_count} equations from dataset{Colors.ENDC}")
+            print(f"{Colors.GREEN}✅ Generated {metrics['total_tests']} test cases{Colors.ENDC}")
+            
+            if config.sample_size:
+                print(f"{Colors.WARNING}📝 Using random sample of {metrics['total_tests']} test cases{Colors.ENDC}")
+        
+    except Exception as e:
+        print(f"{Colors.FAIL}❌ Error during evaluation: {e}{Colors.ENDC}")
+        return 1
     
     # Print results
-    print_results(metrics, args.verbose and not args.summary_only)
+    print_results(metrics, args.verbose and not args.summary_only and not args.quiet)
     
     # Save detailed results if requested
     if args.output:
@@ -587,11 +250,13 @@ Examples:
     
     # Exit with appropriate code
     if metrics.get('correct_arithmetic_pct', 0) < 50:
-        print(f"\n{Colors.WARNING}⚠️ Low accuracy detected - consider additional training{Colors.ENDC}")
-        sys.exit(1)
+        if not args.quiet:
+            print(f"\n{Colors.WARNING}⚠️ Low accuracy detected - consider additional training{Colors.ENDC}")
+        return 1
     else:
-        print(f"\n{Colors.GREEN}🎉 Evaluation completed successfully{Colors.ENDC}")
-        sys.exit(0)
+        if not args.quiet:
+            print(f"\n{Colors.GREEN}🎉 Evaluation completed successfully{Colors.ENDC}")
+        return 0
 
 if __name__ == "__main__":
-    main() 
+    sys.exit(main()) 
