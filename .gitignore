@@ -1,5 +1,7 @@
 # Directories
 .venv/
+models/
+datasets/
 
 # Files
 .DS_Store

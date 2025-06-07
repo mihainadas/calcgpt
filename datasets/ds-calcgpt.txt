@@ -1,1 +1,1 @@
-ds-calcgpt_min0_max1000_ds0_de2_add.txt
+ds-calcgpt_min0_max100_alldigits_allops.txt
