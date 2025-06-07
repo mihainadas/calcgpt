@@ -477,9 +477,9 @@ If you use CalcGPT in your research, please cite:
 ```bibtex
 @software{calcgpt2024,
   title={CalcGPT: Transformer-Based Arithmetic Language Models},
-  author={Your Name},
-  year={2024},
-  url={https://github.com/yourusername/calcgpt}
+  author={Mihai NADAS},
+  year={2025},
+  url={https://github.com/mihainadas/calcgpt}
 }
 ```
 
