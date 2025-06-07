@@ -1,1 +1,6 @@
+# Directories
 .venv/
+
+# Files
+.DS_Store
+*.pth
