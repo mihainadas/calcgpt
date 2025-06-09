@@ -10,7 +10,6 @@ from .train import (
     detect_device,
     load_dataset,
     augment_data,
-    create_vocab,
     OptimizedDataset,
     create_model_config,
     print_model_info
@@ -29,13 +28,16 @@ from .dategen import (
     get_file_stats
 )
 
+from .tokenizer import (
+    CalcGPTTokenizer,
+)
+
 from .inference import (
     CalcGPT,
     InferenceConfig,
     get_device,
     find_latest_model,
     get_model_path,
-    load_vocabulary_from_dataset,
     validate_simple_arithmetic
 )
 
@@ -56,7 +58,6 @@ __all__ = [
     "detect_device", 
     "load_dataset",
     "augment_data",
-    "create_vocab",
     "OptimizedDataset",
     "create_model_config",
     "print_model_info",
@@ -71,13 +72,14 @@ __all__ = [
     "generate_output_filename",
     "parse_filename_parameters",
     "get_file_stats",
+    # Tokenizer exports
+    "CalcGPTTokenizer",
     # Inference exports
     "CalcGPT",
     "InferenceConfig",
     "get_device",
     "find_latest_model",
     "get_model_path",
-    "load_vocabulary_from_dataset",
     "validate_simple_arithmetic",
     # Evaluation exports
     "CalcGPTEvaluator",

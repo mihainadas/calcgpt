@@ -15,9 +15,11 @@
 
 ### 🧮 **Complete ML Pipeline**
 - **Dataset Generation**: Intelligent arithmetic dataset creation with parameter encoding
+- **Dual Tokenization**: Character-level and number-level (0-99) tokenization modes
 - **Model Training**: Advanced transformer training with automatic naming conventions
 - **Model Evaluation**: Comprehensive assessment across multiple test types
 - **Production Inference**: High-performance model serving and batch processing
+- **Comprehensive Logging**: High-traceability logging system for debugging and monitoring
 
 ### 🏗️ **Professional Architecture**
 - **Modular Design**: Clean separation of concerns with reusable components
@@ -26,6 +28,8 @@
 - **Documentation**: Comprehensive inline documentation and examples
 
 ### 📊 **Advanced Features**
+- **Dual Tokenization**: Character-level and number-level (0-99) tokenization modes
+- **High-Traceability Logging**: Component-specific logs with timestamps, thread IDs, and performance monitoring
 - **Data Augmentation**: Automatic commutative property expansion
 - **Intelligent Naming**: Models auto-named with architecture and training parameters
 - **Multi-format Output**: Support for JSON, plain text, and structured outputs
@@ -59,6 +63,9 @@ python calcgpt_train.py --epochs 5 --verbose
 
 # 3. Test the model
 python calcgpt.py -i
+
+# 4. Check logs for detailed traceability
+ls logs/  # calcgpt.log, train.log, etc.
 ```
 
 ## 📖 Usage Guide
@@ -133,6 +140,9 @@ python calcgpt.py \
     --temperature 0.0 \
     --max-tokens 15 \
     -b "99+1" "50-25"
+
+# Note: Tokenization mode is determined by the trained model
+# Use character mode for learning, number mode for production
 ```
 
 ### 📚 Python Library
@@ -158,6 +168,30 @@ dataset = generator.load_dataset(dataset_path)
 analysis = generator.analyze_dataset(dataset)
 print(f"Generated {len(dataset)} examples")
 print(f"Vocabulary: {analysis['vocabulary']}")
+```
+
+#### Tokenization Modes
+```python
+from lib import CalcGPTTokenizer
+
+# Character-level tokenization (default)
+examples = ['1+1=2', '12+34=46', '99-50=49']
+char_tokenizer = CalcGPTTokenizer(examples, mode='char')
+print(f"Character mode - Vocab size: {char_tokenizer.vocab_size}")
+
+# Number-level tokenization (0-99 as single tokens)
+num_tokenizer = CalcGPTTokenizer(examples, mode='number')
+print(f"Number mode - Vocab size: {num_tokenizer.vocab_size}")
+
+# Compare tokenization
+text = "12+34=46"
+char_tokens = char_tokenizer.encode(text)  # [1,2,+,3,4,=,4,6] - 8 tokens
+num_tokens = num_tokenizer.encode(text)    # [12,+,34,=,46] - 5 tokens
+
+# Load from dataset with mode selection
+tokenizer = CalcGPTTokenizer.from_dataset(mode='number')
+info = tokenizer.get_vocab_info()
+print(f"Mode: {info['mode']}, Numbers: {info['numbers_count']}")
 ```
 
 #### Model Training
@@ -241,6 +275,46 @@ for problem in problems:
     print(f"{problem} -> {result['completion']}")
 ```
 
+#### Comprehensive Logging
+```python
+from lib.logger import setup_logging, get_logger, log_step, log_metric, log_performance
+
+# Setup logging system
+setup_logging(
+    logs_dir="logs",
+    console_level="INFO",  # Console output level
+    file_level="DEBUG"     # File output level (more detailed)
+)
+
+# Get component-specific loggers
+train_logger = get_logger('train')
+inference_logger = get_logger('inference')
+
+# Basic logging
+train_logger.info("Starting training process")
+inference_logger.warning("Model accuracy below threshold")
+
+# Structured logging with convenience functions
+log_step("Epoch 1 completed", 'train')
+log_metric("accuracy", 0.95, 'train')
+
+# Performance monitoring with decorators
+@log_performance('model_training', 'train')
+def train_model():
+    # Training code here
+    return {"loss": 0.25}
+
+# Function tracing
+@log_function('inference', log_args=True, log_result=True)
+def predict(input_data):
+    return f"prediction for {input_data}"
+
+# Automatic component-specific log files:
+# - logs/calcgpt.log (main log)
+# - logs/train.log (training-specific)
+# - logs/inference.log (inference-specific)
+```
+
 ## 🏗️ Architecture Overview
 
 ### Project Structure
@@ -249,9 +323,11 @@ calcgpt/
 ├── lib/                           # Core library package
 │   ├── __init__.py               # Unified exports
 │   ├── datagen.py               # Dataset generation
+│   ├── tokenizer.py             # Dual-mode tokenization system
 │   ├── train.py                 # Model training
 │   ├── inference.py             # Model inference
 │   ├── evaluation.py            # Model evaluation
+│   ├── logger.py                # Comprehensive logging system
 │   └── README.md                # Library documentation
 ├── examples/                    # Example scripts
 │   └── complete_workflow.py    # Complete end-to-end example
@@ -275,6 +351,13 @@ calcgpt/
 - Built-in data augmentation (commutative property)
 - Comprehensive dataset analysis
 
+#### 🔤 **CalcGPTTokenizer**
+- Dual tokenization modes: character-level and number-level (0-99)
+- Character mode: Individual characters as tokens (efficient vocab)
+- Number mode: Whole numbers as tokens (semantic understanding)
+- Automatic mode selection and vocabulary optimization
+- Simplified, focused API for arithmetic expressions
+
 #### 🏋️ **CalcGPTTrainer**
 - Advanced transformer model training
 - Automatic architecture optimization
@@ -295,6 +378,14 @@ calcgpt/
 - Batch processing capabilities
 - Multiple output formats
 - Production-ready error handling
+
+#### 📝 **CalcGPTLogger**
+- Comprehensive logging system with high traceability
+- Component-specific log files (train.log, inference.log, etc.)
+- Colored console output with different levels
+- Detailed file logging with timestamps, thread IDs, and module info
+- Performance monitoring decorators and convenience functions
+- Automatic log rotation and configurable levels
 
 ## 📊 Examples & Tutorials
 
@@ -333,12 +424,15 @@ This comprehensive example demonstrates:
 from lib import *
 from pathlib import Path
 
+# 0. Setup logging (optional but recommended)
+setup_logging(console_level="INFO", file_level="DEBUG")
+
 # 1. Generate dataset
 dataset_config = DatagenConfig(max_value=50, max_expressions=5000)
 generator = DatasetGenerator(dataset_config)
 dataset_path = generator.generate()
 
-# 2. Train model
+# 2. Train model with number-level tokenization
 train_config = TrainingConfig(epochs=20, embedding_dim=128, num_layers=4)
 trainer = CalcGPTTrainer(train_config, dataset_path, Path("models/demo"))
 results = trainer.train()
@@ -353,9 +447,27 @@ inference_config = InferenceConfig(temperature=0.0)
 model = CalcGPT(inference_config, "models/demo")
 prediction = model.generate("25+25=")
 print(f"25+25 = {prediction['completion']}")
+
+# 5. Check logs for detailed traceability
+# See logs/calcgpt.log, logs/train.log, logs/inference.log
 ```
 
 ## 🔧 Advanced Configuration
+
+### Tokenization Mode Selection
+```python
+# Character-level tokenization (default) - smaller vocab, longer sequences
+CalcGPTTokenizer(examples, mode='char')     # ~15 tokens vocab
+CalcGPTTokenizer.from_dataset(mode='char')
+
+# Number-level tokenization - larger vocab, shorter sequences  
+CalcGPTTokenizer(examples, mode='number')   # ~105 tokens vocab
+CalcGPTTokenizer.from_dataset(mode='number')
+
+# Performance comparison for "12+34=46":
+# Character mode: 8 tokens [1,2,+,3,4,=,4,6] 
+# Number mode:   5 tokens [12,+,34,=,46]
+```
 
 ### Model Architecture Options
 ```python
@@ -393,6 +505,27 @@ DatagenConfig(
 )
 ```
 
+### Logging Configuration
+```python
+# Basic setup
+setup_logging()  # Uses defaults: INFO console, DEBUG file
+
+# Custom setup
+setup_logging(
+    logs_dir="custom_logs",           # Log directory
+    console_level="DEBUG",            # Console verbosity
+    file_level="DEBUG"                # File verbosity
+)
+
+# Component-specific logging
+train_logger = get_logger('train')      # Creates logs/train.log
+inference_logger = get_logger('inference')  # Creates logs/inference.log
+
+# Log levels: DEBUG, INFO, WARNING, ERROR, CRITICAL
+# File features: automatic rotation (10MB), 5 backups, UTF-8 encoding
+# Console features: colored output, timestamps, function:line info
+```
+
 ## 📈 Performance & Benchmarks
 
 ### Model Performance by Architecture
@@ -410,13 +543,20 @@ DatagenConfig(
 - **Arithmetic Correctness**: Is the mathematical result correct?
 - **Complete Expressions**: Does the model generate complete, valid expressions?
 - **Inference Speed**: Average time per prediction (typically 10-50ms)
+- **Tokenization Efficiency**: Character vs number mode sequence length impact
 
 ### Scaling Guidelines
 
-- **For learning**: Start with tiny models (38K parameters)
+- **For learning**: Start with tiny models (38K parameters) + character tokenization
 - **For development**: Use small to medium models (180K-1.2M parameters)
-- **For production**: Medium to large models (1.2M-4.8M parameters)
-- **For research**: Large models with custom architectures
+- **For production**: Medium to large models (1.2M-4.8M parameters) + number tokenization
+- **For research**: Large models with custom architectures + experiment with tokenization modes
+
+### Tokenization Mode Guidelines
+
+- **Character mode**: Better for learning transformer mechanics, smaller vocabulary
+- **Number mode**: Better for arithmetic understanding, more efficient sequences
+- **Experimentation**: Compare both modes for your specific use case and data range
 
 ## 🤝 Contributing
 

@@ -14,6 +14,8 @@ from torch.utils.data import Dataset
 from transformers import GPT2Config, GPT2LMHeadModel, Trainer, TrainingArguments
 from sklearn.model_selection import train_test_split
 
+from .tokenizer import CalcGPTTokenizer
+
 
 @dataclass
 class TrainingConfig:
@@ -98,53 +100,19 @@ def augment_data(examples: List[str]) -> List[str]:
     return augmented
 
 
-def create_vocab(examples: List[str]) -> Tuple[Dict[str, int], Dict[int, str]]:
-    """Create vocabulary from examples
-    
-    Args:
-        examples: Training examples
-        
-    Returns:
-        Tuple of (vocab_dict, id_to_char_dict)
-    """
-    special_tokens = ['<pad>', '<eos>']
-    chars = sorted(set(''.join(examples)))
-    vocab = {c: i for i, c in enumerate(special_tokens + chars)}
-    id2char = {i: c for c, i in vocab.items()}
-    
-    return vocab, id2char
 
-
-def encode(s: str, vocab: Dict[str, int]) -> List[int]:
-    """Encode string to token IDs
-    
-    Args:
-        s: String to encode
-        vocab: Vocabulary dictionary
-        
-    Returns:
-        List of token IDs
-    """
-    return [vocab[c] for c in s if c in vocab] + [vocab['<eos>']]
 
 
 class OptimizedDataset(Dataset):
     """Pre-tokenized dataset for faster training"""
     
-    def __init__(self, data: List[str], maxlen: int, vocab: Dict[str, int]):
-        """Initialize dataset with pre-tokenized sequences
-        
-        Args:
-            data: List of training examples
-            maxlen: Maximum sequence length for padding
-            vocab: Vocabulary dictionary
-        """
-        self.vocab = vocab
+    def __init__(self, data: List[str], maxlen: int, tokenizer: CalcGPTTokenizer):
+        self.tokenizer = tokenizer
         self.data = []
         
         for example in data:
-            encoded = encode(example, vocab)
-            padded = encoded + [vocab['<pad>']] * (maxlen - len(encoded))
+            encoded = tokenizer.encode(example, add_eos=True)
+            padded = encoded + [tokenizer.pad_token_id] * (maxlen - len(encoded))
             self.data.append(padded)
     
     def __len__(self) -> int:
@@ -158,16 +126,7 @@ class OptimizedDataset(Dataset):
 
 
 def create_model_config(vocab_size: int, max_length: int, config: TrainingConfig) -> GPT2Config:
-    """Create model configuration
-    
-    Args:
-        vocab_size: Size of vocabulary
-        max_length: Maximum sequence length
-        config: Training configuration
-        
-    Returns:
-        GPT2Config object
-    """
+    """Create GPT2 model configuration"""
     return GPT2Config(
         vocab_size=vocab_size,
         n_positions=max_length + 10,
@@ -182,25 +141,16 @@ def create_model_config(vocab_size: int, max_length: int, config: TrainingConfig
 
 
 def print_model_info(model: GPT2LMHeadModel) -> Dict[str, int]:
-    """Print and return model information
-    
-    Args:
-        model: The GPT2 model
-        
-    Returns:
-        Dictionary with model statistics
-    """
+    """Return model statistics"""
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     model_size_mb = total_params * 4 / 1024 / 1024
     
-    stats = {
+    return {
         'total_params': total_params,
         'trainable_params': trainable_params,
         'size_mb': model_size_mb
     }
-    
-    return stats
 
 
 class CalcGPTTrainer:
@@ -223,9 +173,7 @@ class CalcGPTTrainer:
         # Initialize training components
         self.device, self.use_fp16 = detect_device()
         self.examples = None
-        self.vocab = None
-        self.id2char = None
-        self.maxlen = None
+        self.tokenizer = None
         self.model = None
         self.trainer = None
         
@@ -249,12 +197,12 @@ class CalcGPTTrainer:
         else:
             self.log("Data augmentation disabled")
         
-        # Create vocabulary
-        self.vocab, self.id2char = create_vocab(self.examples)
-        self.log(f"Vocabulary created with {len(self.vocab)} tokens")
+        # Create tokenizer
+        self.tokenizer = CalcGPTTokenizer(self.examples)
+        self.log(f"Vocabulary created with {self.tokenizer.vocab_size} tokens")
         
-        # Calculate max sequence length
-        self.maxlen = max(len(encode(x, self.vocab)) for x in self.examples)
+        # Store max length
+        self.maxlen = self.tokenizer.max_length
         self.log(f"Maximum sequence length: {self.maxlen}")
     
     def create_datasets(self) -> Tuple[OptimizedDataset, Optional[OptimizedDataset]]:
@@ -273,12 +221,12 @@ class CalcGPTTrainer:
             self.log(f"Training examples: {len(train_examples)}")
             self.log(f"Validation examples: {len(val_examples)}")
             
-            train_dataset = OptimizedDataset(train_examples, self.maxlen, self.vocab)
-            val_dataset = OptimizedDataset(val_examples, self.maxlen, self.vocab)
+            train_dataset = OptimizedDataset(train_examples, self.maxlen, self.tokenizer)
+            val_dataset = OptimizedDataset(val_examples, self.maxlen, self.tokenizer)
             return train_dataset, val_dataset
         else:
             self.log("No validation split")
-            train_dataset = OptimizedDataset(self.examples, self.maxlen, self.vocab)
+            train_dataset = OptimizedDataset(self.examples, self.maxlen, self.tokenizer)
             return train_dataset, None
     
     def create_model(self) -> GPT2LMHeadModel:
@@ -288,7 +236,7 @@ class CalcGPTTrainer:
             Initialized GPT2LMHeadModel
         """
         self.log("Creating model...")
-        model_config = create_model_config(len(self.vocab), self.maxlen, self.config)
+        model_config = create_model_config(self.tokenizer.vocab_size, self.maxlen, self.config)
         model = GPT2LMHeadModel(model_config)
         model.to(self.device)
         
@@ -354,20 +302,19 @@ class CalcGPTTrainer:
         with torch.no_grad():
             for prompt in test_prompts:
                 try:
-                    input_tokens = encode(prompt, self.vocab)[:-1]  # Remove EOS
+                    input_tokens = self.tokenizer.encode(prompt, add_eos=False)
                     input_ids = torch.tensor([input_tokens]).to(self.device)
                     
                     output = self.model.generate(
                         input_ids,
                         max_length=len(input_tokens) + 5,
                         do_sample=False,
-                        pad_token_id=self.vocab['<pad>'],
-                        eos_token_id=self.vocab['<eos>']
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id
                     )
                     
                     result_tokens = output[0].tolist()
-                    result = ''.join([self.id2char[i] for i in result_tokens 
-                                    if i not in [self.vocab['<pad>'], self.vocab['<eos>']]])
+                    result = self.tokenizer.decode(result_tokens)
                     
                     results[prompt] = result
                     self.log(f"  {prompt} -> {result}")
@@ -428,7 +375,7 @@ class CalcGPTTrainer:
             'training_loss': training_result.training_loss,
             'eval_loss': eval_loss,
             'training_time': training_time,
-            'vocab_size': len(self.vocab),
+            'vocab_size': self.tokenizer.vocab_size,
             'dataset_size': len(self.examples),
             'test_results': test_results,
             'model_params': sum(p.numel() for p in self.model.parameters())

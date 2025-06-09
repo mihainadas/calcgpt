@@ -11,6 +11,8 @@ from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 from transformers import GPT2LMHeadModel, GPT2Config
 
+from .tokenizer import CalcGPTTokenizer
+
 
 @dataclass
 class InferenceConfig:
@@ -22,7 +24,7 @@ class InferenceConfig:
 
 
 def get_device(device_spec: str = 'auto') -> torch.device:
-    """Get the appropriate device for inference"""
+    """Get the best available device"""
     if device_spec == 'auto':
         if torch.cuda.is_available():
             return torch.device('cuda')
@@ -77,34 +79,7 @@ def get_model_path(specified_path: Optional[str]) -> str:
     )
 
 
-def load_vocabulary_from_dataset(dataset_path: Path = None) -> tuple[Dict[str, int], Dict[int, str], int]:
-    """Load vocabulary from dataset file
-    
-    Returns:
-        Tuple of (vocab, id2char, maxlen)
-    """
-    if dataset_path is None:
-        dataset_path = Path('datasets/ds-calcgpt.txt')
-    
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
-        
-    with open(dataset_path) as f:
-        examples = [line.strip() for line in f if line.strip()]
-    
-    # Recreate the same vocabulary used during training
-    special_tokens = ['<pad>', '<eos>']
-    chars = sorted(set(''.join(examples)))
-    vocab = {c: i for i, c in enumerate(special_tokens + chars)}
-    id2char = {i: c for c, i in vocab.items()}
-    
-    # Calculate max length
-    def encode_example(s: str) -> List[int]:
-        return [vocab[c] for c in s if c in vocab] + [vocab['<eos>']]
-    
-    maxlen = max(len(encode_example(x)) for x in examples)
-    
-    return vocab, id2char, maxlen
+
 
 
 def validate_simple_arithmetic(problem: str, answer: str) -> bool:
@@ -149,15 +124,13 @@ class CalcGPT:
         # Initialize device
         self.device = get_device(self.config.device)
         
-        # Initialize model and vocabulary
+        # Initialize model and tokenizer
         self.model = None
-        self.vocab = None
-        self.id2char = None
-        self.maxlen = None
+        self.tokenizer = None
         
-        # Load model and vocabulary
+        # Load model and tokenizer
         self._load_model()
-        self._load_vocabulary()
+        self._load_tokenizer()
         
     def log(self, message: str):
         """Log message if verbose mode is enabled"""
@@ -201,26 +174,18 @@ class CalcGPT:
         except Exception as e:
             raise RuntimeError(f"Error loading model: {e}")
     
-    def _load_vocabulary(self):
-        """Load vocabulary from dataset"""
+    def _load_tokenizer(self):
+        """Load tokenizer from dataset"""
         try:
-            self.vocab, self.id2char, self.maxlen = load_vocabulary_from_dataset()
+            self.tokenizer = CalcGPTTokenizer.from_dataset()
             
             if self.verbose:
-                self.log(f"✅ Vocabulary loaded:")
-                self.log(f"   Vocab size: {len(self.vocab)}")
-                self.log(f"   Max length: {self.maxlen}")
+                self.log(f"✅ Tokenizer loaded:")
+                self.log(f"   Vocab size: {self.tokenizer.vocab_size}")
+                self.log(f"   Max length: {self.tokenizer.max_length}")
                 
         except Exception as e:
-            raise RuntimeError(f"Error loading vocabulary: {e}")
-    
-    def encode(self, s: str) -> List[int]:
-        """Encode string to token IDs"""
-        return [self.vocab[c] for c in s if c in self.vocab] + [self.vocab['<eos>']]
-    
-    def decode(self, ids: List[int]) -> str:
-        """Decode token IDs to string"""
-        return ''.join([self.id2char[i] for i in ids if i != self.vocab['<pad>'] and i != self.vocab['<eos>']])
+            raise RuntimeError(f"Error loading tokenizer: {e}")
     
     def solve(self, problem: str) -> Dict[str, Any]:
         """Solve an arithmetic problem
@@ -239,7 +204,7 @@ class CalcGPT:
             problem += '='
         
         # Encode input (remove EOS for generation)
-        input_tokens = self.encode(problem)[:-1]
+        input_tokens = self.tokenizer.encode(problem, add_eos=False)
         input_ids = torch.tensor([input_tokens], dtype=torch.long).to(self.device)
         
         try:
@@ -249,9 +214,9 @@ class CalcGPT:
                     max_length=len(input_tokens) + self.config.max_tokens,
                     do_sample=self.config.temperature > 0,
                     temperature=self.config.temperature if self.config.temperature > 0 else 1.0,
-                    pad_token_id=self.vocab['<pad>'],
-                    eos_token_id=self.vocab['<eos>'],
-                    bad_words_ids=[[self.vocab['<pad>']]],  # Prevent padding
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    bad_words_ids=[[self.tokenizer.pad_token_id]],  # Prevent padding
                     num_return_sequences=1
                 )
             
@@ -259,8 +224,8 @@ class CalcGPT:
             new_tokens = result_tokens[len(input_tokens):]
             
             # Decode results
-            full_result = self.decode(result_tokens)
-            answer_part = self.decode(new_tokens) if new_tokens else ""
+            full_result = self.tokenizer.decode(result_tokens)
+            answer_part = self.tokenizer.decode(new_tokens) if new_tokens else ""
             
             # Calculate timing
             inference_time = time.time() - start_time
@@ -298,19 +263,8 @@ class CalcGPT:
             }
     
     def solve_batch(self, problems: List[str]) -> List[Dict[str, Any]]:
-        """Solve multiple arithmetic problems
-        
-        Args:
-            problems: List of arithmetic problem strings
-            
-        Returns:
-            List of solution dictionaries
-        """
-        results = []
-        for problem in problems:
-            result = self.solve(problem)
-            results.append(result)
-        return results
+        """Solve multiple arithmetic problems"""
+        return [self.solve(problem) for problem in problems]
     
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the loaded model"""
@@ -325,8 +279,8 @@ class CalcGPT:
             'device': str(self.device),
             'total_parameters': total_params,
             'trainable_parameters': trainable_params,
-            'vocab_size': len(self.vocab) if self.vocab else 0,
-            'max_length': self.maxlen,
+            'vocab_size': self.tokenizer.vocab_size if self.tokenizer else 0,
+            'max_length': self.tokenizer.max_length if self.tokenizer else 0,
             'config': {
                 'temperature': self.config.temperature,
                 'max_tokens': self.config.max_tokens,

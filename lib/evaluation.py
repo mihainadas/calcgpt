@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from collections import defaultdict
 from transformers import GPT2LMHeadModel
 
-from .inference import load_vocabulary_from_dataset, get_device
+from .inference import get_device
+from .tokenizer import CalcGPTTokenizer
 
 
 @dataclass
@@ -201,15 +202,13 @@ class CalcGPTEvaluator:
         # Initialize device
         self.device = get_device(self.config.device)
         
-        # Initialize model and vocabulary
+        # Initialize model and tokenizer
         self.model = None
-        self.vocab = None
-        self.id2char = None
-        self.maxlen = None
+        self.tokenizer = None
         
-        # Load model and vocabulary
+        # Load model and tokenizer
         self._load_model()
-        self._load_vocabulary()
+        self._load_tokenizer()
         
     def log(self, message: str):
         """Log message if verbose mode is enabled"""
@@ -252,26 +251,18 @@ class CalcGPTEvaluator:
         except Exception as e:
             raise RuntimeError(f"Error loading model: {e}")
     
-    def _load_vocabulary(self):
-        """Load vocabulary from dataset"""
+    def _load_tokenizer(self):
+        """Load tokenizer from dataset"""
         try:
-            self.vocab, self.id2char, self.maxlen = load_vocabulary_from_dataset()
+            self.tokenizer = CalcGPTTokenizer.from_dataset()
             
             if self.verbose:
-                self.log(f"✅ Vocabulary loaded:")
-                self.log(f"   Vocab size: {len(self.vocab)}")
-                self.log(f"   Max length: {self.maxlen}")
+                self.log(f"✅ Tokenizer loaded:")
+                self.log(f"   Vocab size: {self.tokenizer.vocab_size}")
+                self.log(f"   Max length: {self.tokenizer.max_length}")
                 
         except Exception as e:
-            raise RuntimeError(f"Error loading vocabulary: {e}")
-    
-    def encode(self, s: str) -> List[int]:
-        """Encode string to token IDs"""
-        return [self.vocab[c] for c in s if c in self.vocab] + [self.vocab['<eos>']]
-    
-    def decode(self, ids: List[int]) -> str:
-        """Decode token IDs to string"""
-        return ''.join([self.id2char[i] for i in ids if i != self.vocab['<pad>'] and i != self.vocab['<eos>']])
+            raise RuntimeError(f"Error loading tokenizer: {e}")
     
     def complete_expression(self, partial_expr: str) -> Dict[str, Any]:
         """Complete a partial arithmetic expression
@@ -288,7 +279,7 @@ class CalcGPTEvaluator:
         partial_expr = partial_expr.strip()
         
         # Encode input (remove EOS for generation)
-        input_tokens = self.encode(partial_expr)[:-1]
+        input_tokens = self.tokenizer.encode(partial_expr, add_eos=False)
         input_ids = torch.tensor([input_tokens], dtype=torch.long).to(self.device)
         
         try:
@@ -297,14 +288,14 @@ class CalcGPTEvaluator:
                     input_ids,
                     max_length=len(input_tokens) + self.config.max_tokens,
                     do_sample=False,  # Greedy for consistent evaluation
-                    pad_token_id=self.vocab['<pad>'],
-                    eos_token_id=self.vocab['<eos>'],
-                    bad_words_ids=[[self.vocab['<pad>']]],  # Prevent padding
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    bad_words_ids=[[self.tokenizer.pad_token_id]],  # Prevent padding
                     num_return_sequences=1
                 )
             
             result_tokens = generated[0].tolist()
-            completion = self.decode(result_tokens)
+            completion = self.tokenizer.decode(result_tokens)
             
             # Calculate timing
             inference_time = time.time() - start_time
@@ -396,8 +387,8 @@ class CalcGPTEvaluator:
             'device': str(self.device),
             'total_parameters': total_params,
             'trainable_parameters': trainable_params,
-            'vocab_size': len(self.vocab) if self.vocab else 0,
-            'max_length': self.maxlen,
+            'vocab_size': self.tokenizer.vocab_size if self.tokenizer else 0,
+            'max_length': self.tokenizer.max_length if self.tokenizer else 0,
             'config': {
                 'max_tokens': self.config.max_tokens,
                 'device': self.config.device,

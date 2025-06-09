@@ -36,9 +36,9 @@ def print_banner():
     banner = f"""
 {Colors.BLUE}{Colors.BOLD}
 ╔═══════════════════════════════════════════════════════════════╗
-║                        CalcGPT Eval                          ║
-║                   Model Evaluation Tool                      ║
-║                         v2.0.0                               ║
+║                        CalcGPT Eval                           ║
+║                   Model Evaluation Tool                       ║
+║                         v2.0.0                                ║
 ╚═══════════════════════════════════════════════════════════════╝
 {Colors.ENDC}"""
     print(banner)
