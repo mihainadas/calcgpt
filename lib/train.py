@@ -365,9 +365,12 @@ class CalcGPTTrainer:
             eval_loss = eval_results['eval_loss']
             self.log(f"Final validation loss: {eval_loss:.4f}")
         
+        # Persist the final model so it is always loadable, regardless of save_steps
+        self.trainer.save_model(str(self.output_dir))
+
         # Quick test
         test_results = self.run_quick_test()
-        
+
         self.log(f"\nModel saved to: {self.output_dir}")
         
         # Return training statistics

@@ -7,6 +7,21 @@
 
 **CalcGPT** is a comprehensive framework for building, training, and deploying transformer-based language models specialized in arithmetic operations. It demonstrates how to create domain-specific language models from scratch using modern deep learning techniques.
 
+## ✨ Live Demo
+
+```bash
+# install deps, train a model, then watch the model show off
+pip install -r requirements.txt
+python calcgpt_train.py --epochs 25 --batch-size 64 \
+    --embedding-dim 128 --num-layers 4 --num-heads 8 -o models/calcgpt-demo
+python demo.py
+```
+
+`demo.py` walks through the model's architecture, streams a few generations
+token-by-token, stress-tests it on 40 random problems with a live results
+table, peeks at the top-k probabilities for a single step, and drops you
+into an interactive prompt.
+
 ## 🌟 Features
 
 ### 🛠️ **Dual Interface Design**
