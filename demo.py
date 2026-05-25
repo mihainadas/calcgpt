@@ -64,7 +64,7 @@ V1_MODEL = Path("models/calcgpt-demo")
 V1_DATASET = Path("datasets/ds-calcgpt_min0_max100_alldigits_allops.txt")
 
 # Must match the operand-width used by scripts/gen_padded.py
-OPERAND_WIDTH = 5
+OPERAND_WIDTH = 3
 ANSWER_WIDTH = OPERAND_WIDTH + 1
 
 
@@ -341,10 +341,8 @@ def stage_v1_vs_v2(
         (67, "+", 33),
         (123, "+", 456),
         (999, "+", 1),
-        (1234, "+", 5678),
-        (9999, "-", 1234),
-        (98765, "+", 4321),
-        (1234567, "+", 7654321),
+        (456, "-", 123),
+        (700, "+", 299),
     ]
 
     table = Table(box=None, padding=(0, 2))
@@ -383,8 +381,8 @@ def stage_topk(
     model: GPT2LMHeadModel,
     tokenizer: CalcGPTTokenizer,
     device: torch.device,
-    a: int = 12345,
-    b: int = 67890,
+    a: int = 478,
+    b: int = 365,
 ) -> None:
     prompt = pad_prompt(a, "+", b)
     expected = a + b  # 80235
@@ -518,11 +516,11 @@ def main() -> int:
 
     showcase = [
         (7, "+", 8),
+        (47, "+", 25),
         (234, "+", 567),
-        (9876, "+", 1234),
-        (100000, "-", 1),
-        (987654, "+", 12346),
-        (1234567, "+", 7654321),
+        (999, "+", 1),
+        (728, "-", 134),
+        (123, "+", 456),
     ]
     stage_live_generation(model, tokenizer, device, showcase)
 
