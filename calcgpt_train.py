@@ -69,7 +69,8 @@ def create_config_from_args(args) -> TrainingConfig:
         save_steps=args.save_steps,
         test_split=args.test_split,
         seed=args.seed,
-        no_augmentation=args.no_augmentation
+        no_augmentation=args.no_augmentation,
+        n_positions=args.n_positions,
     )
 
 
@@ -195,6 +196,13 @@ Examples:
         type=int,
         default=42,
         help='Random seed for reproducibility (default: 42)'
+    )
+
+    parser.add_argument(
+        '--n-positions',
+        type=int,
+        default=None,
+        help='Override model context length (default: training maxlen + 10)'
     )
     
     # Utility options

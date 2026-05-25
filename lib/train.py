@@ -33,6 +33,7 @@ class TrainingConfig:
     test_split: float = 0.2
     seed: int = 42
     no_augmentation: bool = False
+    n_positions: Optional[int] = None  # explicit context window; defaults to maxlen+10
 
 
 def detect_device() -> Tuple[str, bool]:
@@ -127,10 +128,11 @@ class OptimizedDataset(Dataset):
 
 def create_model_config(vocab_size: int, max_length: int, config: TrainingConfig) -> GPT2Config:
     """Create GPT2 model configuration"""
+    n_positions = config.n_positions if config.n_positions else max_length + 10
     return GPT2Config(
         vocab_size=vocab_size,
-        n_positions=max_length + 10,
-        n_embd=config.embedding_dim, 
+        n_positions=n_positions,
+        n_embd=config.embedding_dim,
         n_layer=config.num_layers,
         n_head=config.num_heads,
         n_inner=config.feedforward_dim,
@@ -365,9 +367,12 @@ class CalcGPTTrainer:
             eval_loss = eval_results['eval_loss']
             self.log(f"Final validation loss: {eval_loss:.4f}")
         
+        # Persist the final model so it is always loadable, regardless of save_steps
+        self.trainer.save_model(str(self.output_dir))
+
         # Quick test
         test_results = self.run_quick_test()
-        
+
         self.log(f"\nModel saved to: {self.output_dir}")
         
         # Return training statistics

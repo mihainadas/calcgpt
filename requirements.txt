@@ -14,6 +14,8 @@ numpy==2.3.0
 packaging==25.0
 PyYAML==6.0.2
 regex==2024.11.6
+rich>=13.0
+accelerate>=0.26.0
 requests==2.32.4
 safetensors==0.5.3
 scikit-learn==1.7.0
