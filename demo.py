@@ -211,9 +211,10 @@ def stage_live_generation(
 ) -> None:
     console.rule("[bold cyan]live generation", style="cyan")
     console.print(
-        "[dim]Operands are zero-padded to 7 digits.  The model emits the "
-        "answer [bold]least-significant digit first[/bold] (the carry "
-        "direction).  Reverse the bold part to read the answer.[/dim]\n"
+        f"[dim]Operands are zero-padded to {OPERAND_WIDTH} digits.  "
+        f"The model emits the answer [bold]least-significant digit "
+        f"first[/bold] (the carry direction).  Reverse the bold part "
+        f"to read the answer.[/dim]\n"
     )
 
     for a, op, b in pairs:
@@ -280,11 +281,11 @@ def stage_scaling(
     )
 
     table = Table(box=None, padding=(0, 2))
-    table.add_column("operand range", style="bold", width=22)
-    table.add_column("accuracy", justify="right", width=10)
-    table.add_column("bar", width=30)
-    table.add_column("avg ms", justify="right", style="dim", width=8)
-    table.add_column("samples", justify="right", style="dim", width=10)
+    table.add_column("operand range", style="bold", width=18)
+    table.add_column("accuracy", justify="right", width=9)
+    table.add_column("bar", width=26)
+    table.add_column("avg ms", justify="right", style="dim", width=7)
+    table.add_column("samples", justify="right", style="dim", width=8)
 
     with Live(table, console=console, refresh_per_second=8) as live:
         for d in range(1, OPERAND_WIDTH + 1):
@@ -348,7 +349,7 @@ def stage_v1_vs_v2(
     table = Table(box=None, padding=(0, 2))
     table.add_column("problem", style="bold", width=22)
     table.add_column("old (0–100)", width=14)
-    table.add_column("new (7-digit)", width=14)
+    table.add_column(f"new ({OPERAND_WIDTH}-digit)", width=14)
     table.add_column("truth", style="dim", width=14)
 
     for a, op, b in problems:
@@ -502,13 +503,14 @@ def main() -> int:
         console.print(
             f"[red]No model found at {V2_MODEL}.[/red]\n\n"
             "Generate the dataset and train the model first:\n"
-            "  [bold]python scripts/gen_padded.py[/bold]\n"
+            f"  [bold]python scripts/gen_padded.py -w {OPERAND_WIDTH}"
+            "[/bold]\n"
             "  [bold]python calcgpt_train.py "
             "-d datasets/ds-calcgpt-padded.txt -o models/calcgpt-padded "
-            "--epochs 12 --batch-size 128 --embedding-dim 128 "
+            "--epochs 30 --batch-size 64 --embedding-dim 128 "
             "--num-layers 4 --num-heads 8 --feedforward-dim 256 "
-            "--learning-rate 1e-3 --warmup-steps 100 --n-positions 32 "
-            "--no-augmentation[/bold]"
+            "--learning-rate 1e-3 --warmup-steps 100 --n-positions 20 "
+            "--save-steps 2000 --no-augmentation[/bold]"
         )
         return 1
     model, tokenizer, device, model_v1, tokenizer_v1 = stage_load()
