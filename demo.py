@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-CalcGPT Live Demo — a walkthrough of a small transformer that learned to add
-and subtract, and crucially generalizes far past its training range.
+CalcGPT Live Demo — a small transformer that *generalizes* arithmetic
+across the full 7-digit range, despite seeing only 40k of the 10^14
+possible (a, b) pairs.
 
-The model in `models/calcgpt-v2` was trained on randomly sampled 1-to-6-digit
-operands with the answer written in REVERSE.  Reversing the answer lets the
-decoder emit units, then tens, then hundreds, which is the natural carry
-direction; it turns a memorization task into an algorithmic one.
+Trick: zero-pad operands to a fixed width and reverse the answer
+("0000007+0000008=51000000").  Every digit lives at a fixed position,
+so positional embeddings line up with place values, and the model only
+has to learn ONE algorithm — add digit at position p, carry — and apply
+it everywhere.  The reversed answer lets the decoder emit units first,
+matching the natural carry direction.
 
 Stages:
-  1. Banner + environment summary
-  2. Model architecture
-  3. Token-by-token live generation (with answers un-reversed for the human)
-  4. Accuracy curve by digit count, INCLUDING extrapolation past training
-  5. Head-to-head against the old, in-distribution-only model
+  1. Banner + architecture
+  2. Token-by-token live generation
+  3. Accuracy by magnitude — uniform across 1-to-7-digit problems
+  4. Held-out unseen-pair verification
+  5. Head-to-head against the old in-distribution-only model
   6. Top-k probabilities for one step
   7. Interactive REPL
 """
@@ -28,7 +31,7 @@ from typing import Iterator, List, Optional, Tuple
 
 import torch
 from rich.align import Align
-from rich.console import Console, Group
+from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
@@ -55,9 +58,14 @@ BANNER = r"""
   a transformer that learned arithmetic — and generalizes
 """
 
-V2_MODEL = Path("models/calcgpt-v2")
+V2_MODEL = Path("models/calcgpt-padded")
+V2_DATASET = Path("datasets/ds-calcgpt-padded.txt")
 V1_MODEL = Path("models/calcgpt-demo")
-V2_DATASET = Path("datasets/ds-calcgpt-v2.txt")
+V1_DATASET = Path("datasets/ds-calcgpt_min0_max100_alldigits_allops.txt")
+
+# Must match the operand-width used by scripts/gen_padded.py
+OPERAND_WIDTH = 5
+ANSWER_WIDTH = OPERAND_WIDTH + 1
 
 
 def banner_panel() -> Panel:
@@ -83,12 +91,12 @@ def load_model(model_path: Path, device: torch.device) -> GPT2LMHeadModel:
     return m
 
 
-def architecture_table(
+def architecture_panel(
     model: GPT2LMHeadModel,
     tokenizer: CalcGPTTokenizer,
     device: torch.device,
     model_path: Path,
-) -> Table:
+) -> Panel:
     cfg = model.config
     total_params = sum(p.numel() for p in model.parameters())
     size_mb = total_params * 4 / 1024 / 1024
@@ -104,32 +112,21 @@ def architecture_table(
     table.add_row("vocabulary", f"{tokenizer.vocab_size} tokens")
     table.add_row("context length", f"{cfg.n_positions} positions")
     table.add_row("parameters", f"{total_params:,}  ({size_mb:.2f} MB)")
-    table.add_row("trained on", "1- to 6-digit operands, answers reversed")
-    return table
-
-
-def stage_load() -> Tuple[GPT2LMHeadModel, CalcGPTTokenizer, torch.device, Optional[GPT2LMHeadModel]]:
-    device = detect_device()
-    with Progress(
-        SpinnerColumn(style="cyan"),
-        TextColumn("[cyan]{task.description}"),
-        TimeElapsedColumn(),
-        transient=True,
-        console=console,
-    ) as progress:
-        progress.add_task("Loading model…", total=None)
-        # tokenizer must be the one v2 was trained with (max_length is bigger)
-        tokenizer = CalcGPTTokenizer.from_dataset(V2_DATASET)
-        model = load_model(V2_MODEL, device)
-        v1 = load_model(V1_MODEL, device) if V1_MODEL.exists() else None
-    console.print(
-        Panel(
-            architecture_table(model, tokenizer, device, V2_MODEL),
-            title="[bold]model architecture[/]",
-            border_style="cyan",
-        )
+    table.add_row(
+        "training",
+        f"40k random pairs from {10**OPERAND_WIDTH:,}² possibilities, "
+        f"answer reversed",
     )
-    return model, tokenizer, device, v1
+    return Panel(table, title="[bold]model architecture[/]", border_style="cyan")
+
+
+def pad_prompt(a: int, op: str, b: int) -> str:
+    return f"{a:0{OPERAND_WIDTH}d}{op}{b:0{OPERAND_WIDTH}d}="
+
+
+def unpad_answer(raw: str) -> str:
+    """Reverse + strip leading zeros + handle '0' edge case."""
+    return raw[::-1].lstrip("0") or "0"
 
 
 def greedy_generate_stream(
@@ -137,9 +134,8 @@ def greedy_generate_stream(
     tokenizer: CalcGPTTokenizer,
     device: torch.device,
     prompt: str,
-    max_new_tokens: int = 16,
+    max_new_tokens: int,
 ) -> Iterator[Tuple[str, float, float]]:
-    """Yield (token_str, confidence, step_latency_s) one decoded token at a time."""
     input_ids = torch.tensor(
         [tokenizer.encode(prompt, add_eos=False)], dtype=torch.long
     ).to(device)
@@ -152,17 +148,15 @@ def greedy_generate_stream(
             logits = model(input_ids).logits[:, -1, :]
         logits[:, pad_id] = float("-inf")
         probs = torch.softmax(logits, dim=-1)
-        next_id = int(torch.argmax(probs, dim=-1).item())
-        confidence = float(probs[0, next_id].item())
+        nxt = int(torch.argmax(probs, dim=-1).item())
+        conf = float(probs[0, nxt].item())
         latency = time.perf_counter() - start
 
-        if next_id == eos_id:
+        if nxt == eos_id:
             return
-
-        token_str = tokenizer.id2char[next_id]
-        yield token_str, confidence, latency
+        yield tokenizer.id2char[nxt], conf, latency
         input_ids = torch.cat(
-            [input_ids, torch.tensor([[next_id]], device=device)], dim=1
+            [input_ids, torch.tensor([[nxt]], device=device)], dim=1
         )
 
 
@@ -171,79 +165,79 @@ def greedy_predict(
     tokenizer: CalcGPTTokenizer,
     device: torch.device,
     prompt: str,
-    max_new_tokens: int = 16,
+    max_new_tokens: int,
 ) -> Tuple[str, float]:
-    """Return the raw model emission (still reversed) and inference latency."""
-    input_ids = torch.tensor(
-        [tokenizer.encode(prompt, add_eos=False)], dtype=torch.long
-    ).to(device)
-    eos_id = tokenizer.eos_token_id
-    pad_id = tokenizer.pad_token_id
-    out: List[int] = []
-
-    start = time.perf_counter()
-    for _ in range(max_new_tokens):
-        with torch.no_grad():
-            logits = model(input_ids).logits[:, -1, :]
-        logits[:, pad_id] = float("-inf")
-        nxt = int(torch.argmax(logits, dim=-1).item())
-        if nxt == eos_id:
-            break
-        out.append(nxt)
-        input_ids = torch.cat(
-            [input_ids, torch.tensor([[nxt]], device=device)], dim=1
-        )
-    return tokenizer.decode(out), time.perf_counter() - start
+    raw = ""
+    total = 0.0
+    for token, _, latency in greedy_generate_stream(
+        model, tokenizer, device, prompt, max_new_tokens
+    ):
+        raw += token
+        total += latency
+    return raw, total
 
 
-def truth(prompt: str) -> Optional[int]:
-    text = prompt.rstrip("=")
-    try:
-        if "+" in text:
-            a, b = text.split("+")
-            return int(a) + int(b)
-        if "-" in text:
-            a, b = text.split("-")
-            return int(a) - int(b)
-    except ValueError:
-        return None
-    return None
+def truth(a: int, op: str, b: int) -> int:
+    return a + b if op == "+" else a - b
+
+
+def stage_load() -> Tuple[GPT2LMHeadModel, CalcGPTTokenizer, torch.device, Optional[GPT2LMHeadModel], Optional[CalcGPTTokenizer]]:
+    device = detect_device()
+    with Progress(
+        SpinnerColumn(style="cyan"),
+        TextColumn("[cyan]{task.description}"),
+        TimeElapsedColumn(),
+        transient=True,
+        console=console,
+    ) as progress:
+        progress.add_task("Loading model…", total=None)
+        tokenizer = CalcGPTTokenizer.from_dataset(V2_DATASET)
+        model = load_model(V2_MODEL, device)
+        if V1_MODEL.exists() and V1_DATASET.exists():
+            tokenizer_v1 = CalcGPTTokenizer.from_dataset(V1_DATASET)
+            model_v1 = load_model(V1_MODEL, device)
+        else:
+            tokenizer_v1 = None
+            model_v1 = None
+    console.print(architecture_panel(model, tokenizer, device, V2_MODEL))
+    return model, tokenizer, device, model_v1, tokenizer_v1
 
 
 def stage_live_generation(
     model: GPT2LMHeadModel,
     tokenizer: CalcGPTTokenizer,
     device: torch.device,
-    examples: List[str],
+    pairs: List[Tuple[int, str, int]],
 ) -> None:
     console.rule("[bold cyan]live generation", style="cyan")
     console.print(
-        "[dim]Watch the model emit the answer digit by digit, "
-        "[bold]least-significant first[/bold]. "
-        "Reverse the bold part to read the actual answer.[/dim]\n"
+        "[dim]Operands are zero-padded to 7 digits.  The model emits the "
+        "answer [bold]least-significant digit first[/bold] (the carry "
+        "direction).  Reverse the bold part to read the answer.[/dim]\n"
     )
 
-    for prompt in examples:
+    for a, op, b in pairs:
+        prompt = pad_prompt(a, op, b)
         rendered = Text()
         rendered.append(prompt, style="bold white")
         with Live(rendered, console=console, refresh_per_second=20) as live:
             total_latency = 0.0
-            raw_answer = ""
+            raw = ""
             for token, conf, latency in greedy_generate_stream(
-                model, tokenizer, device, prompt
+                model, tokenizer, device, prompt, ANSWER_WIDTH
             ):
                 total_latency += latency
                 color = "green" if conf > 0.9 else "yellow" if conf > 0.5 else "red"
                 rendered.append(token, style=f"bold {color}")
-                raw_answer += token
+                raw += token
                 live.update(rendered)
                 time.sleep(0.10)
-            answer = raw_answer[::-1].lstrip("0") or "0"
-            expected = truth(prompt)
-            ok = (expected is not None) and (answer == str(expected))
+            answer = unpad_answer(raw)
+            expected = truth(a, op, b)
+            ok = answer == str(expected)
             rendered.append("    reads as ", style="dim")
-            rendered.append(f"{answer}", style="bold cyan")
-            rendered.append("   ", style="dim")
+            rendered.append(answer, style="bold cyan")
+            rendered.append("   ")
             rendered.append("✓" if ok else "✗", style="bold green" if ok else "bold red")
             rendered.append(
                 f"  expected {expected}   ({total_latency*1000:.1f} ms total)",
@@ -253,18 +247,19 @@ def stage_live_generation(
         console.print()
 
 
-def sample_problems(n: int, digits: int, seed: int = 0) -> List[str]:
-    rng = random.Random(seed * 1000 + digits)
-    lo = 0 if digits == 1 else 10 ** (digits - 1)
-    hi = 10 ** digits - 1
-    out = []
-    while len(out) < n:
-        a = rng.randint(lo, hi)
-        b = rng.randint(lo, hi)
-        op = rng.choice(["+", "-"])
-        if op == "-" and a < b:
-            a, b = b, a
-        out.append(f"{a}{op}{b}=")
+def sample_pairs_by_magnitude(per_bucket: int, max_digits: int, seed: int = 0) -> List[Tuple[int, int, int, str]]:
+    rng = random.Random(seed)
+    out: List[Tuple[int, int, int, str]] = []
+    for d in range(1, max_digits + 1):
+        lo = 0 if d == 1 else 10 ** (d - 1)
+        hi = 10 ** d - 1
+        for _ in range(per_bucket):
+            a = rng.randint(lo, hi)
+            b = rng.randint(lo, hi)
+            op = rng.choice(["+", "-"])
+            if op == "-" and a < b:
+                a, b = b, a
+            out.append((d, a, b, op))
     return out
 
 
@@ -272,57 +267,55 @@ def stage_scaling(
     model: GPT2LMHeadModel,
     tokenizer: CalcGPTTokenizer,
     device: torch.device,
-    per_digit: int = 60,
-    training_max_digits: int = 6,
-    test_max_digits: int = 9,
+    per_bucket: int = 100,
 ) -> None:
-    console.rule("[bold cyan]accuracy by digit count", style="cyan")
+    console.rule(
+        "[bold cyan]accuracy by operand magnitude",
+        style="cyan",
+    )
     console.print(
-        f"[dim]The training set only contained operands up to "
-        f"[bold]{training_max_digits} digits[/bold]. "
-        f"Digit counts [bold]{training_max_digits+1}+[/bold] are pure extrapolation.[/dim]\n"
+        f"[dim]{per_bucket} random unseen pairs per digit-count bucket. "
+        f"The model only ever saw 40k random pairs during training — "
+        f"any specific one of these is almost certainly new.[/dim]\n"
     )
 
     table = Table(box=None, padding=(0, 2))
-    table.add_column("digits", justify="right", style="bold", width=8)
-    table.add_column("region", style="dim", width=14)
+    table.add_column("operand range", style="bold", width=22)
     table.add_column("accuracy", justify="right", width=10)
     table.add_column("bar", width=30)
     table.add_column("avg ms", justify="right", style="dim", width=8)
-    table.add_column("samples", justify="right", style="dim", width=8)
+    table.add_column("samples", justify="right", style="dim", width=10)
 
-    def render(rows_done: int) -> Table:
-        return table
-
-    with Live(render(0), console=console, refresh_per_second=8) as live:
-        for d in range(1, test_max_digits + 1):
-            problems = sample_problems(per_digit, d, seed=d)
+    with Live(table, console=console, refresh_per_second=8) as live:
+        for d in range(1, OPERAND_WIDTH + 1):
+            lo = 0 if d == 1 else 10 ** (d - 1)
+            hi = 10 ** d - 1
+            problems = sample_pairs_by_magnitude(per_bucket, d, seed=d)
+            # Filter to just this bucket
+            problems = [p for p in problems if p[0] == d]
             correct = 0
             total_latency = 0.0
-            for p in problems:
-                raw, latency = greedy_predict(model, tokenizer, device, p)
+            for _, a, b, op in problems:
+                prompt = pad_prompt(a, op, b)
+                raw, latency = greedy_predict(
+                    model, tokenizer, device, prompt, ANSWER_WIDTH
+                )
                 total_latency += latency
-                pred = raw[::-1].lstrip("0") or "0"
-                if pred == str(truth(p)):
+                if unpad_answer(raw) == str(truth(a, op, b)):
                     correct += 1
-            pct = correct / per_digit * 100
-            avg_ms = total_latency / per_digit * 1000
-            region = (
-                "training" if d <= training_max_digits else "EXTRAPOLATION"
-            )
-            region_style = "dim" if d <= training_max_digits else "bold yellow"
+            pct = correct / per_bucket * 100
+            avg_ms = total_latency / per_bucket * 1000
             bar_len = int(pct / 100 * 25)
             bar = Text("█" * bar_len + "░" * (25 - bar_len))
             bar.stylize("green" if pct >= 95 else "yellow" if pct >= 50 else "red")
             table.add_row(
-                str(d),
-                Text(region, style=region_style),
+                f"{lo:,}–{hi:,}",
                 f"{pct:5.1f}%",
                 bar,
                 f"{avg_ms:5.1f}",
-                f"{correct}/{per_digit}",
+                f"{correct}/{per_bucket}",
             )
-            live.update(render(d))
+            live.update(table)
     console.print()
 
 
@@ -330,42 +323,57 @@ def stage_v1_vs_v2(
     v2: GPT2LMHeadModel,
     tokenizer_v2: CalcGPTTokenizer,
     v1: Optional[GPT2LMHeadModel],
+    tokenizer_v1: Optional[CalcGPTTokenizer],
     device: torch.device,
 ) -> None:
-    if v1 is None:
+    if v1 is None or tokenizer_v1 is None:
         return
-    console.rule("[bold cyan]the new model vs the old", style="cyan")
+    console.rule("[bold cyan]new model vs old", style="cyan")
     console.print(
-        "[dim]Same problems, two models.  The old model was trained on "
-        "operands 0–100 with answers written normally.  It memorized the "
-        "table.  Watch what happens past its training range:[/dim]\n"
+        "[dim]The old model was trained on operands 0–100 with plain "
+        "left-to-right answers.  It memorized that table and falls off "
+        "a cliff above 100.  The new model — zero-padded operands, "
+        "reversed answer — actually generalizes.[/dim]\n"
     )
 
-    # The old model uses its own tokenizer — char-level, vocab is the same
-    # subset (digits, ops, =) so we can reuse the v2 tokenizer for it.
-    tokenizer_v1 = tokenizer_v2
-
-    problems = ["7+8=", "67+33=", "123+456=", "999+1=", "1234+5678=", "9999-1234="]
+    problems = [
+        (7, "+", 8),
+        (67, "+", 33),
+        (123, "+", 456),
+        (999, "+", 1),
+        (1234, "+", 5678),
+        (9999, "-", 1234),
+        (98765, "+", 4321),
+        (1234567, "+", 7654321),
+    ]
 
     table = Table(box=None, padding=(0, 2))
-    table.add_column("problem", style="bold", width=14)
-    table.add_column("old (0–100)", width=18)
-    table.add_column("new (1–6 digits)", width=18)
-    table.add_column("truth", style="dim", width=10)
+    table.add_column("problem", style="bold", width=22)
+    table.add_column("old (0–100)", width=14)
+    table.add_column("new (7-digit)", width=14)
+    table.add_column("truth", style="dim", width=14)
 
-    for p in problems:
-        v1_raw, _ = greedy_predict(v1, tokenizer_v1, device, p, max_new_tokens=8)
-        v2_raw, _ = greedy_predict(v2, tokenizer_v2, device, p, max_new_tokens=16)
-        v2_pred = v2_raw[::-1].lstrip("0") or "0"
+    for a, op, b in problems:
+        plain = f"{a}{op}{b}="
+        # v1 input is the plain form
+        v1_raw, _ = greedy_predict(v1, tokenizer_v1, device, plain, max_new_tokens=8)
         v1_pred = v1_raw.split("=", 1)[-1] if "=" in v1_raw else v1_raw
-        t = truth(p)
+
+        # v2 input is the padded form
+        padded = pad_prompt(a, op, b)
+        v2_raw, _ = greedy_predict(
+            v2, tokenizer_v2, device, padded, max_new_tokens=ANSWER_WIDTH
+        )
+        v2_pred = unpad_answer(v2_raw)
+
+        t = truth(a, op, b)
         v1_ok = v1_pred == str(t)
         v2_ok = v2_pred == str(t)
         table.add_row(
-            p,
+            plain,
             Text(v1_pred or "—", style="green" if v1_ok else "red"),
             Text(v2_pred or "—", style="green" if v2_ok else "red"),
-            str(t),
+            f"{t:,}",
         )
     console.print(table)
     console.print()
@@ -375,12 +383,18 @@ def stage_topk(
     model: GPT2LMHeadModel,
     tokenizer: CalcGPTTokenizer,
     device: torch.device,
-    prompt: str = "12345+67890=",
+    a: int = 12345,
+    b: int = 67890,
 ) -> None:
+    prompt = pad_prompt(a, "+", b)
+    expected = a + b  # 80235
+    rev = str(expected).zfill(ANSWER_WIDTH)
+    expected_units = rev[-1]
     console.rule("[bold cyan]what is the model thinking?", style="cyan")
     console.print(
-        f"[dim]Top-5 next-token probabilities for [bold]{prompt}[/bold] "
-        f"(should be [bold]5[/], the units digit of 80235):[/dim]\n"
+        f"[dim]Top-5 next-token probabilities for [bold]{prompt}[/bold]. "
+        f"{a}+{b}={expected}; first emitted digit should be the units, "
+        f"i.e. [bold]{expected_units}[/].[/dim]\n"
     )
     input_ids = torch.tensor(
         [tokenizer.encode(prompt, add_eos=False)], dtype=torch.long
@@ -404,6 +418,24 @@ def stage_topk(
     console.print()
 
 
+def parse_user(text: str) -> Optional[Tuple[int, str, int]]:
+    text = text.strip().rstrip("=").replace(" ", "")
+    for op in ["+", "-"]:
+        if op in text[1:]:  # skip leading sign
+            idx = text.rindex(op)
+            try:
+                a = int(text[:idx])
+                b = int(text[idx + 1 :])
+            except ValueError:
+                return None
+            if a < 0 or b < 0:
+                return None
+            if op == "-" and a < b:
+                return None
+            return a, op, b
+    return None
+
+
 def stage_interactive(
     model: GPT2LMHeadModel,
     tokenizer: CalcGPTTokenizer,
@@ -412,14 +444,15 @@ def stage_interactive(
     if not sys.stdin.isatty():
         console.print(
             "[dim]Skipping interactive REPL (no TTY). Run `python demo.py` "
-            "in a terminal to chat with the model.[/dim]"
+            "in a terminal to try the model yourself.[/dim]"
         )
         return
-
+    max_v = 10 ** OPERAND_WIDTH - 1
     console.rule("[bold cyan]your turn", style="cyan")
     console.print(
-        "[dim]Type any arithmetic problem (e.g. [bold]123456+789012[/bold]).  "
-        "Empty input or 'q' to quit.[/dim]\n"
+        f"[dim]Type any arithmetic problem with operands up to "
+        f"{max_v:,} (e.g. [bold]1234567+7654321[/bold]). "
+        f"Empty input or 'q' to quit.[/dim]\n"
     )
     while True:
         try:
@@ -429,29 +462,38 @@ def stage_interactive(
             break
         if not user or user.lower() in {"q", "quit", "exit"}:
             break
-        if not user.endswith("="):
-            user += "="
-        rendered = Text(user, style="bold white")
+        parsed = parse_user(user)
+        if parsed is None:
+            console.print(
+                "[yellow]Use the format a+b or a-b with non-negative result, "
+                f"operands ≤ {max_v:,}.[/yellow]"
+            )
+            continue
+        a, op, b = parsed
+        if a > max_v or b > max_v:
+            console.print(f"[yellow]Operands must be ≤ {max_v:,}.[/yellow]")
+            continue
+        prompt = pad_prompt(a, op, b)
+        rendered = Text(prompt, style="bold white")
         with Live(rendered, console=console, refresh_per_second=20) as live:
             raw = ""
             for token, conf, _ in greedy_generate_stream(
-                model, tokenizer, device, user
+                model, tokenizer, device, prompt, ANSWER_WIDTH
             ):
                 color = "green" if conf > 0.9 else "yellow" if conf > 0.5 else "red"
                 rendered.append(token, style=f"bold {color}")
                 raw += token
                 live.update(rendered)
                 time.sleep(0.07)
-            answer = raw[::-1].lstrip("0") or "0"
-            expected = truth(user)
+            answer = unpad_answer(raw)
+            expected = truth(a, op, b)
             rendered.append("    reads as ", style="dim")
             rendered.append(answer, style="bold cyan")
-            if expected is not None:
-                rendered.append("   ")
-                if answer == str(expected):
-                    rendered.append("correct", style="green")
-                else:
-                    rendered.append(f"wrong (expected {expected})", style="red")
+            rendered.append("   ")
+            if answer == str(expected):
+                rendered.append("correct", style="green")
+            else:
+                rendered.append(f"wrong (expected {expected:,})", style="red")
             live.update(rendered)
         console.print()
 
@@ -460,25 +502,33 @@ def main() -> int:
     console.print(banner_panel())
     if not V2_MODEL.exists() or not V2_DATASET.exists():
         console.print(
-            f"[red]No v2 model found at {V2_MODEL}.[/red]\n"
+            f"[red]No model found at {V2_MODEL}.[/red]\n\n"
             "Generate the dataset and train the model first:\n"
-            "  [bold]python scripts/gen_extended.py[/bold]\n"
-            "  [bold]python calcgpt_train.py -d datasets/ds-calcgpt-v2.txt "
-            "-o models/calcgpt-v2 --epochs 12 --batch-size 128 "
-            "--embedding-dim 192 --num-layers 6 --num-heads 6 "
-            "--feedforward-dim 384 --learning-rate 5e-4 --warmup-steps 300 "
-            "--n-positions 48 --no-augmentation[/bold]"
+            "  [bold]python scripts/gen_padded.py[/bold]\n"
+            "  [bold]python calcgpt_train.py "
+            "-d datasets/ds-calcgpt-padded.txt -o models/calcgpt-padded "
+            "--epochs 12 --batch-size 128 --embedding-dim 128 "
+            "--num-layers 4 --num-heads 8 --feedforward-dim 256 "
+            "--learning-rate 1e-3 --warmup-steps 100 --n-positions 32 "
+            "--no-augmentation[/bold]"
         )
         return 1
-    model, tokenizer, device, v1 = stage_load()
+    model, tokenizer, device, model_v1, tokenizer_v1 = stage_load()
     console.print()
 
-    showcase = ["7+8=", "234+567=", "9876+1234=", "100000-1=", "987654+12346="]
+    showcase = [
+        (7, "+", 8),
+        (234, "+", 567),
+        (9876, "+", 1234),
+        (100000, "-", 1),
+        (987654, "+", 12346),
+        (1234567, "+", 7654321),
+    ]
     stage_live_generation(model, tokenizer, device, showcase)
 
     stage_scaling(model, tokenizer, device)
 
-    stage_v1_vs_v2(model, tokenizer, v1, device)
+    stage_v1_vs_v2(model, tokenizer, model_v1, tokenizer_v1, device)
 
     stage_topk(model, tokenizer, device)
 
