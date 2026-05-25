@@ -181,9 +181,10 @@ def stage_live_generation(
             answer = rendered.plain.split("=", 1)[1] if "=" in rendered.plain else "?"
             expected = ground_truth(prompt)
             ok = answer.strip() == str(expected)
-            mark = "[bold green]✓[/]" if ok else "[bold red]✗[/]"
+            rendered.append("    ")
+            rendered.append("✓" if ok else "✗", style="bold green" if ok else "bold red")
             rendered.append(
-                f"    {mark}  expected {expected}   ({total_latency*1000:.1f} ms total)",
+                f"  expected {expected}   ({total_latency*1000:.1f} ms total)",
                 style="dim",
             )
             live.update(rendered)
@@ -374,8 +375,11 @@ def stage_interactive(
             expected = ground_truth(user)
             if expected is not None:
                 ok = predicted.strip() == str(expected)
-                tag = "[green]correct[/]" if ok else f"[red]wrong (expected {expected})[/]"
-                rendered.append(f"   {tag}", style="dim")
+                rendered.append("   ")
+                if ok:
+                    rendered.append("correct", style="green")
+                else:
+                    rendered.append(f"wrong (expected {expected})", style="red")
                 live.update(rendered)
         console.print()
 
