@@ -1,0 +1,18 @@
+include ARTIFACTS.md
+include CHANGELOG.md
+include CITATION.cff
+include CODE_OF_CONDUCT.md
+include CONTRIBUTING.md
+include DATA_CARD.md
+include demo.py
+include MODEL_CARD.md
+include README.md
+include SECURITY.md
+include requirements.txt
+
+recursive-include configs *.toml
+recursive-include datasets *.txt
+recursive-include docs *.md
+recursive-include examples *.py
+recursive-include scripts *.py
+recursive-include tests *.py

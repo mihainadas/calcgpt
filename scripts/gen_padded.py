@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate an arithmetic dataset for length-generalization via fixed-width
+Generate an arithmetic dataset for within-width generalization via fixed-width
 zero-padding and a reversed answer.
 
 Why this format generalizes
@@ -22,50 +22,39 @@ every digit lives at a fixed position from left to right:
    position 8   millions of operand B
    ...
 
-The model learns ONE algorithm — add digit at position p_A to digit at
-position p_B with carry — and applies it everywhere.  Because every
-randomly sampled (a, b) pair in the training set drives the same circuit,
-the model interpolates over the entire numerical range, not over a table
-of seen pairs.
+This representation makes a reusable digit-and-carry procedure easier to
+learn and allows exact held-out evaluation across the configured range.
 
 Reversing the answer lets the decoder emit units first (carries flow
 naturally left to right in the output sequence).
 """
 
+# ruff: noqa: E402
+
 import argparse
-import random
+import sys
 from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from lib.benchmark import sample_task_roster, task_space_size
+from lib.representation import RepresentationSpec
 
 
 def format_example(a: int, b: int, op: str, operand_width: int, answer_width: int) -> str:
-    if op == "+":
-        r = a + b
-    else:
-        r = a - b
-    a_s = str(a).zfill(operand_width)
-    b_s = str(b).zfill(operand_width)
-    r_s = str(r).zfill(answer_width)
-    return f"{a_s}{op}{b_s}={r_s[::-1]}"
+    if answer_width != operand_width + 1:
+        raise ValueError("answer_width must equal operand_width + 1")
+    spec = RepresentationSpec.from_name("padded-reversed", operand_width)
+    return spec.format_task((a, op, b))
 
 
 def sample_examples(
     n: int, operand_width: int, seed: int
 ) -> list[str]:
-    rng = random.Random(seed)
-    lo = 0
-    hi = 10 ** operand_width - 1
-    answer_width = operand_width + 1  # max sum is 2*hi which has at most width+1 digits
-    out: set[str] = set()
-    while len(out) < n:
-        a = rng.randint(lo, hi)
-        b = rng.randint(lo, hi)
-        op = rng.choice(["+", "-"])
-        if op == "-" and a < b:
-            a, b = b, a
-        out.add(format_example(a, b, op, operand_width, answer_width))
-    examples = list(out)
-    rng.shuffle(examples)
-    return examples
+    roster = sample_task_roster(n, operand_width, seed)
+    spec = RepresentationSpec.from_name("padded-reversed", operand_width)
+    return spec.render_dataset(roster)
 
 
 def main() -> int:
@@ -75,8 +64,8 @@ def main() -> int:
         "-w",
         "--operand-width",
         type=int,
-        default=7,
-        help="Zero-pad operands to this many digits (default 7)",
+        default=3,
+        help="Zero-pad operands to this many digits (default 3)",
     )
     parser.add_argument(
         "-o",
@@ -87,16 +76,24 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    examples = sample_examples(args.num_examples, args.operand_width, args.seed)
+    try:
+        examples = sample_examples(args.num_examples, args.operand_width, args.seed)
+    except ValueError as exc:
+        parser.error(str(exc))
 
-    with args.output.open("w") as f:
-        f.write("\n".join(examples) + "\n")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    dataset_bytes = ("\n".join(examples) + "\n").encode("utf-8")
+    args.output.write_bytes(dataset_bytes)
 
     print(f"wrote {len(examples):,} examples -> {args.output}")
-    print(f"operand width: {args.operand_width} digits  (max value {10**args.operand_width - 1:,})")
+    print(
+        f"operand width: {args.operand_width} digits  "
+        f"(max value {10**args.operand_width - 1:,})"
+    )
+    print(f"task space: {task_space_size(args.operand_width):,} distinct tasks")
     print(f"sequence length: {len(examples[0])} characters")
-    print(f"first 5 samples:")
+    print("first 5 samples:")
     for ex in examples[:5]:
         print(f"  {ex}")
     return 0

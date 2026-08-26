@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a focused improvement to CalcGPT.
+title: "[Feature] "
+labels: []
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: What problem or research question would this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Describe the behavior, interface, and expected tradeoffs.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: How should correctness, reproducibility, or model quality be evaluated?
+    validations:
+      required: true

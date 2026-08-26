@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-"""
-CalcGPT - CLI Interface
+"""CalcGPT - CLI Interface.
 
 A command-line interface for running inference with CalcGPT models.
 Supports interactive mode, batch processing, and various output formats.
 
 Author: Mihai NADAS
-Version: 2.0.0
 """
 
-import argparse
-import sys
-import json
-import time
-from pathlib import Path
-from typing import List, Dict, Optional
-import readline  # For better input experience
-from datetime import datetime
+from __future__ import annotations
 
-from lib.inference import CalcGPT, InferenceConfig, get_model_path
+import argparse
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, List, Optional
+
+from lib.version import __version__
+
+if TYPE_CHECKING:
+    from lib.inference import CalcGPT
 
 # ANSI color codes for beautiful output
 class Colors:
@@ -39,13 +40,15 @@ def print_banner():
 ╔═══════════════════════════════════════════════════════════════╗
 ║                            CalcGPT                            ║
 ║                   Arithmetic Language Model                   ║
-║                         CLI Tool v2.0.0                       ║
+║{f'CLI Tool v{__version__}':^63}║
 ╚═══════════════════════════════════════════════════════════════╝
 {Colors.ENDC}"""
     print(banner)
 
-def create_config_from_args(args) -> InferenceConfig:
+def create_config_from_args(args):
     """Create InferenceConfig from command line arguments"""
+    from lib.inference import InferenceConfig
+
     return InferenceConfig(
         temperature=args.temperature,
         max_tokens=args.max_tokens,
@@ -100,9 +103,18 @@ def interactive_mode(calcgpt: CalcGPT):
     except Exception as e:
         print(f"{Colors.FAIL}❌ Unexpected error: {e}{Colors.ENDC}")
 
-def batch_mode(calcgpt: CalcGPT, problems: List[str], output_format: str, output_file: Optional[str]):
+def batch_mode(
+    calcgpt: CalcGPT,
+    problems: List[str],
+    output_format: str,
+    output_file: Optional[str],
+    quiet: bool = False,
+) -> int:
     """Run CalcGPT in batch mode"""
-    print(f"\n{Colors.GREEN}📊 Batch Mode - Processing {len(problems)} problems{Colors.ENDC}")
+    if not problems:
+        raise ValueError("batch mode requires at least one problem")
+    if not quiet and output_format != 'json':
+        print(f"\n{Colors.GREEN}📊 Batch Mode - Processing {len(problems)} problems{Colors.ENDC}")
     
     results = calcgpt.solve_batch(problems)
     
@@ -111,7 +123,8 @@ def batch_mode(calcgpt: CalcGPT, problems: List[str], output_format: str, output
     total = len(results)
     errors = sum(1 for r in results if 'error' in r)
     
-    print(f"\r{Colors.CYAN}Completed: {total}/{total}{Colors.ENDC}")
+    if not quiet and output_format != 'json':
+        print(f"\r{Colors.CYAN}Completed: {total}/{total}{Colors.ENDC}")
     
     # Output results
     if output_format == 'json':
@@ -179,11 +192,13 @@ def batch_mode(calcgpt: CalcGPT, problems: List[str], output_format: str, output
                     time_ms = result['inference_time'] * 1000
                     f.write(f"{result['problem']:<15} {answer:<10} {time_ms:<10.1f} {status:<10}\n")
                 
-                f.write(f"\nStatistics:\n")
+                f.write("\nStatistics:\n")
                 f.write(f"  Correct: {correct}/{total} ({correct/total*100:.1f}%)\n")
                 f.write(f"  Errors: {errors}/{total} ({errors/total*100:.1f}%)\n")
             
             print(f"{Colors.GREEN}📄 Results saved to: {output_file}{Colors.ENDC}")
+
+    return errors
 
 def main():
     parser = argparse.ArgumentParser(
@@ -195,7 +210,7 @@ Examples:
   %(prog)s -m ./custom_model                  # Use custom model path
   %(prog)s -b "1+1" "2+3" "10+5"             # Batch mode with problems
   %(prog)s -f problems.txt                    # Batch mode from file
-  %(prog)s -i --temperature 0.2 --verbose    # Interactive with custom settings
+  %(prog)s -i --temperature 0.2              # Interactive with sampling
   %(prog)s -b "1+1" "2+3" -o results.json    # Save results to JSON
         """
     )
@@ -203,21 +218,26 @@ Examples:
     # Model options
     parser.add_argument('-m', '--model', default='auto',
                        help='Path to model directory (default: auto-detect latest model)')
+    parser.add_argument(
+        '--legacy-dataset',
+        help='Exact training dataset used to migrate a legacy model without tokenizer.json',
+    )
     parser.add_argument('-d', '--device', default='auto', 
                        choices=['auto', 'cuda', 'mps', 'cpu'],
                        help='Device to use for inference (default: auto)')
     
     # Mode options
-    parser.add_argument('-i', '--interactive', action='store_true',
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('-i', '--interactive', action='store_true',
                        help='Run in interactive mode (default)')
-    parser.add_argument('-b', '--batch', nargs='*',
+    modes.add_argument('-b', '--batch', nargs='+',
                        help='Run in batch mode with specified problems')
-    parser.add_argument('-f', '--file', type=str,
+    modes.add_argument('-f', '--file', type=str,
                        help='Read problems from file (one per line)')
     
     # Generation parameters
-    parser.add_argument('-t', '--temperature', type=float, default=0.1,
-                       help='Sampling temperature (default: 0.1, use 0 for greedy)')
+    parser.add_argument('-t', '--temperature', type=float, default=0.0,
+                       help='Sampling temperature (default: 0 for greedy)')
     parser.add_argument('--max-tokens', type=int, default=10,
                        help='Maximum tokens to generate (default: 10)')
     
@@ -232,52 +252,89 @@ Examples:
     # Utility options
     parser.add_argument('--quiet', action='store_true',
                        help='Suppress verbose output')
-    parser.add_argument('--version', action='version', version='CalcGPT 2.0.0')
+    parser.add_argument('--version', action='version', version=f'CalcGPT {__version__}')
     
     args = parser.parse_args()
+
+    if args.temperature < 0:
+        parser.error("temperature cannot be negative")
+    if args.max_tokens < 1:
+        parser.error("max-tokens must be positive")
+
+    machine_output = (
+        args.format == 'json'
+        and args.output is None
+        and (args.batch is not None or args.file is not None)
+    )
+    quiet = args.quiet or machine_output
+
+    try:
+        from lib.inference import CalcGPT, get_model_path
+    except ModuleNotFoundError as exc:
+        print(
+            f"CalcGPT inference dependencies are unavailable ({exc}). "
+            'Install them with: python -m pip install ".[train]"',
+            file=sys.stderr,
+        )
+        return 1
     
     # Print banner unless suppressed
-    if not args.quiet:
+    if not quiet:
         print_banner()
     
     # Get model path
     try:
         model_path = get_model_path(args.model)
-        if not args.quiet:
+        if not quiet:
             if args.model == 'auto':
                 print(f"{Colors.GREEN}🎯 Auto-detected model: {Colors.CYAN}{Path(model_path).name}{Colors.ENDC}")
             else:
                 print(f"{Colors.CYAN}📁 Using model: {model_path}{Colors.ENDC}")
     except FileNotFoundError as e:
-        print(f"{Colors.FAIL}❌ {e}{Colors.ENDC}")
+        print(f"{Colors.FAIL}❌ {e}{Colors.ENDC}", file=sys.stderr)
         return 1
     
     # Create configuration
     config = create_config_from_args(args)
     
     # Initialize CalcGPT
-    if not args.quiet:
+    if not quiet:
         print(f"{Colors.CYAN}Initializing CalcGPT...{Colors.ENDC}")
     
     try:
-        calcgpt = CalcGPT(model_path, config, verbose=not args.quiet)
+        calcgpt = CalcGPT(
+            model_path,
+            config,
+            verbose=not quiet,
+            legacy_dataset_path=args.legacy_dataset,
+        )
     except Exception as e:
-        print(f"{Colors.FAIL}❌ Error initializing CalcGPT: {e}{Colors.ENDC}")
+        print(
+            f"{Colors.FAIL}❌ Error initializing CalcGPT: {e}{Colors.ENDC}",
+            file=sys.stderr,
+        )
         return 1
     
     # Determine mode and execute
     try:
         if args.batch is not None:
             # Batch mode with command line problems
-            batch_mode(calcgpt, args.batch, args.format, args.output)
+            errors = batch_mode(calcgpt, args.batch, args.format, args.output, quiet=quiet)
+            if errors:
+                return 1
         elif args.file:
             # Batch mode with file input
             try:
                 with open(args.file, 'r') as f:
                     problems = [line.strip() for line in f if line.strip()]
-                batch_mode(calcgpt, problems, args.format, args.output)
+                errors = batch_mode(calcgpt, problems, args.format, args.output, quiet=quiet)
+                if errors:
+                    return 1
             except Exception as e:
-                print(f"{Colors.FAIL}❌ Error reading file: {e}{Colors.ENDC}")
+                print(
+                    f"{Colors.FAIL}❌ Error reading file: {e}{Colors.ENDC}",
+                    file=sys.stderr,
+                )
                 return 1
         else:
             # Interactive mode (default)
@@ -286,14 +343,17 @@ Examples:
         return 0
         
     except KeyboardInterrupt:
-        print(f"\n{Colors.WARNING}⚠️ Interrupted by user{Colors.ENDC}")
+        print(
+            f"\n{Colors.WARNING}⚠️ Interrupted by user{Colors.ENDC}",
+            file=sys.stderr,
+        )
         return 1
     except Exception as e:
-        print(f"{Colors.FAIL}❌ Unexpected error: {e}{Colors.ENDC}")
-        if not args.quiet:
+        print(f"{Colors.FAIL}❌ Unexpected error: {e}{Colors.ENDC}", file=sys.stderr)
+        if not quiet:
             import traceback
             traceback.print_exc()
         return 1
 
 if __name__ == "__main__":
-    sys.exit(main()) 
+    sys.exit(main())

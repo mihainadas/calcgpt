@@ -6,21 +6,21 @@ A command-line interface for generating arithmetic expression datasets
 with configurable parameters, filtering options, and analysis capabilities.
 
 Author: Mihai NADAS
-Version: 2.0.0
 """
 
 import argparse
 import sys
-import time
 from pathlib import Path
 
 from lib.dategen import (
-    DatasetGenerator, 
-    DatagenConfig, 
-    parse_digit_set, 
+    DatagenConfig,
+    DatasetGenerator,
+    get_file_stats,
+    parse_digit_set,
     parse_filename_parameters,
-    get_file_stats
 )
+from lib.version import __version__
+
 
 # ANSI color codes for beautiful output
 class Colors:
@@ -41,7 +41,7 @@ def print_banner():
 ╔═══════════════════════════════════════════════════════════════╗
 ║                    CalcGPT DataGen                            ║
 ║                 Dataset Generation Tool                       ║
-║                         v2.0.0                                ║
+║{f'v{__version__}':^63}║
 ╚═══════════════════════════════════════════════════════════════╝
 {Colors.ENDC}"""
     print(banner)
@@ -269,7 +269,7 @@ Examples:
     parser.add_argument(
         '--version',
         action='version',
-        version='CalcGPT DataGen 2.0.0'
+        version=f'CalcGPT DataGen {__version__}'
     )
     
     args = parser.parse_args()

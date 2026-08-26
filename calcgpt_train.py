@@ -6,14 +6,13 @@ A command-line interface for training CalcGPT models with
 optimized architectures, data augmentation, and comprehensive evaluation.
 
 Author: Mihai NADAS
-Version: 2.0.0
 """
 
 import argparse
 import sys
 from pathlib import Path
 
-from lib.train import CalcGPTTrainer, TrainingConfig
+from lib.version import __version__
 
 
 def validate_arguments(args) -> None:
@@ -40,6 +39,27 @@ def validate_arguments(args) -> None:
     
     if args.embedding_dim % args.num_heads != 0:
         errors.append("embedding-dim must be divisible by num-heads")
+
+    if args.feedforward_dim < 1:
+        errors.append("feedforward-dim must be positive")
+
+    if args.warmup_steps < 0:
+        errors.append("warmup-steps cannot be negative")
+
+    if args.save_steps < 1:
+        errors.append("save-steps must be positive")
+
+    if args.weight_decay < 0:
+        errors.append("weight-decay cannot be negative")
+
+    if args.n_positions is not None and args.n_positions < 1:
+        errors.append("n-positions must be positive")
+
+    if args.operand_width is not None and args.operand_width < 1:
+        errors.append("operand-width must be positive")
+
+    if args.operand_width is None:
+        errors.append("operand-width is required for every task format")
     
     if not Path(args.dataset).exists():
         errors.append(f"dataset file not found: {args.dataset}")
@@ -54,8 +74,10 @@ def validate_arguments(args) -> None:
         sys.exit(1)
 
 
-def create_config_from_args(args) -> TrainingConfig:
+def create_config_from_args(args):
     """Create TrainingConfig from command line arguments"""
+    from lib.train import TrainingConfig
+
     return TrainingConfig(
         epochs=args.epochs,
         batch_size=args.batch_size,
@@ -69,8 +91,12 @@ def create_config_from_args(args) -> TrainingConfig:
         save_steps=args.save_steps,
         test_split=args.test_split,
         seed=args.seed,
+        split_seed=args.split_seed,
         no_augmentation=args.no_augmentation,
         n_positions=args.n_positions,
+        task_format=args.task_format,
+        operand_width=args.operand_width,
+        loss_scope=args.loss_scope,
     )
 
 
@@ -85,7 +111,7 @@ Examples:
   %(prog)s -d datasets/large.txt -e 100            # Custom dataset, 100 epochs
   %(prog)s --embedding-dim 256 --num-layers 8      # Larger model architecture  
   %(prog)s --batch-size 16 --learning-rate 5e-4    # Custom training parameters
-  %(prog)s -o models/calcgpt-v2 --verbose          # Custom output directory
+  %(prog)s -o models/calcgpt-v2 --quiet            # Custom output directory
   %(prog)s --no-augmentation                       # Disable data augmentation
         """
     )
@@ -174,7 +200,7 @@ Examples:
         '--save-steps',
         type=int,
         default=5000,
-        help='Model save frequency (default: 1000)'
+        help='Model save frequency (default: 5000)'
     )
     
     # Data processing
@@ -199,10 +225,38 @@ Examples:
     )
 
     parser.add_argument(
+        '--split-seed',
+        type=int,
+        default=None,
+        help='Validation split seed (default: use --seed for compatibility)'
+    )
+
+    parser.add_argument(
         '--n-positions',
         type=int,
         default=None,
         help='Override model context length (default: training maxlen + 10)'
+    )
+
+    parser.add_argument(
+        '--task-format',
+        choices=['plain', 'reversed', 'padded', 'padded-reversed'],
+        default='plain',
+        help='Arithmetic representation stored in the model manifest',
+    )
+
+    parser.add_argument(
+        '--operand-width',
+        type=int,
+        default=3,
+        help='Maximum operand width and fixed width when padded (default: 3)',
+    )
+
+    parser.add_argument(
+        '--loss-scope',
+        choices=['full-sequence', 'answer-only'],
+        default='full-sequence',
+        help='Tokens included in the language-model loss (default: full-sequence)',
     )
     
     # Utility options
@@ -215,7 +269,7 @@ Examples:
     parser.add_argument(
         '--version',
         action='version',
-        version='CalcGPT Trainer 2.0.0'
+        version=f'CalcGPT Trainer {__version__}'
     )
     
     args = parser.parse_args()
@@ -223,8 +277,17 @@ Examples:
     # Validate arguments
     validate_arguments(args)
     
-    # Create configuration
-    config = create_config_from_args(args)
+    # Import the optional ML stack only after dependency-light argument validation.
+    try:
+        config = create_config_from_args(args)
+        from lib.train import CalcGPTTrainer
+    except ModuleNotFoundError as exc:
+        print(
+            f"CalcGPT training dependencies are unavailable ({exc}). "
+            'Install them with: python -m pip install ".[train]"',
+            file=sys.stderr,
+        )
+        return 1
     
     # Setup paths
     dataset_path = Path(args.dataset)
@@ -239,6 +302,9 @@ Examples:
         print(f"  📖 Training: {config.epochs} epochs, batch {config.batch_size}, lr {config.learning_rate}")
         print(f"  🔧 Data augmentation: {'Disabled' if config.no_augmentation else 'Enabled'}")
         print(f"  📊 Test split: {config.test_split:.1%}")
+        print(f"  🧾 Task format: {config.task_format}")
+        print(f"  🎯 Loss scope: {config.loss_scope}")
+        print(f"  ✂️  Split seed: {config.split_seed}")
         print()
     
     try:
@@ -257,11 +323,16 @@ Examples:
         if not args.quiet:
             print("\n🎉 Training Summary:")
             print(f"  📊 Final loss: {results['training_loss']:.4f}")
-            if results['eval_loss']:
+            if results['eval_loss'] is not None:
                 print(f"  📉 Validation loss: {results['eval_loss']:.4f}")
             print(f"  ⏱️  Training time: {results['training_time']/60:.1f} minutes")
             print(f"  🧠 Model parameters: {results['model_params']:,}")
             print(f"  📚 Dataset size: {results['dataset_size']:,} examples")
+            print(
+                "  ✂️  Split: "
+                f"{results['training_examples']:,} train / "
+                f"{results['validation_examples']:,} validation"
+            )
             print(f"  🔤 Vocabulary size: {results['vocab_size']} tokens")
             
             print("\n🧪 Quick Test Results:")

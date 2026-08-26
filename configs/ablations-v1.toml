@@ -1,0 +1,41 @@
+schema = "calcgpt-ablation-plan"
+schema_version = 1
+name = "representations-width3-v1"
+
+[data]
+source = "datasets/ds-calcgpt-padded.txt"
+source_representation = "padded-reversed"
+source_sha256 = "de810f1c93fba69e2d0fc3985bcfb9fc62e88d9083df320ce069e7ffc5a9667c"
+operand_width = 3
+task_count = 40000
+seed = 42
+
+[experiment]
+representations = ["plain", "reversed", "padded", "padded-reversed"]
+model_seeds = [41, 42, 43]
+split_seed = 42
+output_root = "outputs/ablations-v1"
+
+[benchmark]
+seed = 42
+samples_per_digit_bucket = 100
+semantic_addition_groups = true
+decoding = "greedy"
+
+[model]
+embedding_dim = 128
+num_layers = 4
+num_heads = 8
+feedforward_dim = 256
+n_positions = 20
+
+[training]
+epochs = 30
+batch_size = 64
+learning_rate = 0.001
+warmup_steps = 100
+weight_decay = 0.01
+save_steps = 2000
+validation_fraction = 0.2
+augmentation = false
+loss_scope = "answer-only"

@@ -1,156 +1,142 @@
-# How CalcGPT learns to generalize
+# Arithmetic representation and within-width generalization
 
-A small transformer (≈500K parameters, four layers) trained on **40,000
-random arithmetic problems** answers the remaining **999,960** problems
-in the 0–999 range with **100% accuracy**. This file explains why that
-works.
+CalcGPT studies how the textual representation of arithmetic changes what a
+small causal transformer can learn. This note describes the hypothesis and the
+evaluation protocol; it does not treat a single model run as proof that a neural
+network has learned a symbolic algorithm.
 
-## The starting point — and why it failed
+## Hypothesis
 
-The original demo trained on every `a + b = c` and `a − b = c` for
-`a, b ∈ [0, 100]`. About 15,000 examples. After 25 epochs the model
-solved the training distribution at 99% accuracy and **0% accuracy on
-anything outside it.** The cliff is total:
+A conventional decoder must emit the most-significant result digit first:
 
-| Operand range | Accuracy |
-|---|---|
-| 0–100 (training) | 99.5% |
-| 101–200 (just over) | 1.5% |
-| 201–500 | 0% |
-| 500+ | 0% |
+```text
+123+456=579
+        ^ first output token
+```
 
-Two reasons:
+That token can depend on carries originating several positions away. Reversing
+the answer changes the generation order to units, tens, hundreds, and so on:
 
-1. **It memorized.** With 800K parameters and only ~10K unique pairs in
-   training, the cheapest loss-reducer is to learn the answer table.
-   Carry-add is harder to discover than memorization, so gradient
-   descent doesn't bother.
-2. **It learned answer-length statistics.** Training answers were 1–3
-   digits. On `146 + 175` (which has a 3-digit answer 321) the model
-   often emits a single digit and stops, because it's also learned
-   "stop after ~2 chars."
+```text
+123+456=9750
+        ^ units digit first
+```
 
-Below the cliff, the model behaves like a transformer pretending it
-knows arithmetic: it emits plausibly-shaped numbers that happen to be
-wrong.
+Using fixed-width fields zero-pads both operands to `W` digits and the answer to
+`W + 1` digits. This assigns each place value a stable absolute position:
 
-## Fix #1 — Reverse the answer
+```text
+007+008=5100
+```
 
-A standard left-to-right decoder must emit the **most significant
-digit first**:
+For a width-3 addition, the two units digits always occupy positions 2 and 6,
+and the first answer token always occupies position 8. This makes a reusable
+digit-and-carry computation easier to represent with learned positional
+embeddings.
 
-    1234 + 5678 = 6912
-                  ^ this digit first
+The expected benefit is **within-width combinatorial generalization**: transfer
+to unseen operand pairs inside the fixed width. Wider operands occupy positions
+that were not trained for, so this setup is not a length-generalization method.
 
-But to know that leading "6" is correct, the model has to compute the
-entire sum *before* emitting anything. That's a hard credit-assignment
-problem during training.
+## Canonical task space
 
-Reverse the answer:
+For operand width `W`, let `N = 10**W`.
 
-    1234 + 5678 = 2196
-                  ^ units digit first (carry direction)
+- ordered additions: `N²`;
+- nonnegative subtractions with `a >= b`: `N(N+1)/2`;
+- total: `N² + N(N+1)/2`.
 
-Now decoding follows the natural carry order: units, then tens, then
-hundreds, then thousands. To predict the next answer digit, the model
-needs only the corresponding place-value digits of each operand plus
-the carry state from the previous step. This is something a small
-transformer can actually learn.
+At width 3, this is 1,500,500 distinct tasks. The canonical training dataset
+contains 40,000 tasks sampled uniformly without replacement from that space.
+Generation is deterministic for a fixed seed and independent of Python hash
+randomization.
 
-Reversing alone helped, but on its own it wasn't enough — the
-positions of "the units digit of operand A" still vary with operand
-length.
+## Split and benchmark requirements
 
-## Fix #2 — Zero-pad the operands to a fixed width
+A credible result must satisfy all of the following:
 
-Standard text: `7 + 8 = 51` (reversed answer `51` = 15).
+1. Generate train, validation, and benchmark membership deterministically.
+2. Keep commutative addition twins such as `012+034` and `034+012` in the same
+   split.
+3. Sample benchmark tasks without replacement.
+4. Verify zero semantic overlap with every task used for training or validation:
+   addition twins share a sorted-operand group, while subtraction remains
+   directional.
+5. Save dataset/split hashes, configuration, seed, package versions, Git revision,
+   and metrics with the model.
+6. Decode outputs according to the model's task format before computing numerical
+   accuracy.
+7. Report exact sequence match, numerical accuracy, format validity, and EOS
+   behavior separately.
 
-Padded text: `007 + 008 = 5100`.
+`lib/benchmark.py` implements deterministic held-out sampling. `demo.py` uses
+benchmark seed 42 to select 100 unique tasks from each of the one-, two-, and
+three-digit operand buckets after excluding the committed training dataset. The
+benchmark seed stays fixed while training seeds vary.
 
-Now every digit lives at a *known absolute position* from the start of
-the sequence:
+## What can be concluded
 
-    position 0: hundreds of operand A
-    position 1: tens of operand A
-    position 2: units of operand A
-    position 3: operator
-    position 4: hundreds of operand B
-    ...
-    position 8: units of the reversed answer  ← emit this first
-    position 9: tens of the reversed answer
-    ...
+High accuracy on a strictly held-out benchmark is evidence consistent with a
+reusable arithmetic procedure. It is not, by itself, proof of a symbolic
+algorithm or correctness over the complete finite domain. A 300-task benchmark
+estimates performance; exhaustive evaluation is required to make a full-domain
+accuracy statement.
 
-GPT-2 uses *learned* absolute positional embeddings. With zero-padding,
-position 8's embedding consistently means "the units digit of the
-answer," across every training example. The model learns one small
-attention pattern — "attend to position 2 and position 6 to produce
-position 8" — and applies it across every (a, b) pair. The same
-applies for every other digit position.
+The strongest experimental comparison should be a controlled ablation using the
+same architecture, data budget, task space, splits, and seeds:
 
-Without padding, the units digit of operand A might be at position 0
-(if A is one-digit) or position 4 (if A is five-digit). The model
-would need to learn a *length-aware* attention pattern, which is much
-harder than a fixed one.
+| Condition | Fixed-width operands and answer | Reversed answer |
+|---|---:|---:|
+| Plain baseline | no | no |
+| Reverse only | no | yes |
+| Fixed-width only | yes | no |
+| Combined | yes | yes |
 
-## Putting both together
+Run each condition over multiple seeds and report the distribution, not only the
+best run.
 
-Format: `0000007+0000008=51000000` becomes the new training example
-for "what is 7 + 8?". With operands padded to width W:
+This matrix compares whole representations, not operand padding in isolation.
+With answer-only loss, minimal-layout answers contain a variable number of target
+digits, while fixed-width answers always contain `W + 1`; EOS is supervised in
+both cases. Each run report must include the number of supervised answer tokens
+and EOS targets in its training and validation splits. A causal claim about
+fixed-width layout independent of target-token budget would require a separate
+matched-budget design.
 
-- Sequence length is fixed: `W + 1 + W + 1 + (W+1)` characters.
-- Positional embeddings encode place value directly.
-- The decoder emits in carry order.
+The experiment plan and result set should be plain versioned files. Declare all
+conditions and seeds in advance, publish an immutable report for every run, and
+retain failures and low-accuracy outcomes. A small model scoring poorly is still a
+valid experimental result when its data, configuration, artifact, and evaluation
+provenance are intact; it should not be silently rerun or omitted.
 
-The model only has to learn one circuit, and that circuit factors
-across digit positions. It works on every pair in the 10^W × 10^W
-input space, not just the ones it happened to see.
+Every planned cell must produce a status record. Completed records bind the model,
+training manifest, normalized train/validation rosters, and evaluation output to
+the declared benchmark-manifest hash. Failed records retain the stage, error or
+exit status, configuration, Git revision, and available logs or partial-artifact
+hashes. Completed reports include exact match, numerical accuracy, strict format,
+EOS behavior, and counts with denominators by operation, operand-width bucket,
+carry/borrow count and chain length, overflow, zero operand, and equal operands.
 
-## Empirical result
+Reinforcement learning is deferred until after the supervised four-way baseline
+is complete. Any later RL study needs its own predeclared reward, optimization,
+seed, stopping, and failure-reporting protocol while keeping the benchmark
+manifest frozen and outside reward selection. No RL implementation or result is
+claimed here.
 
-Same model size (534K parameters, 128-dim, 4 layers, 8 heads), same
-hardware (CPU), same hours of compute (~16 minutes for the padded
-run vs ~4 minutes for the memorizer).
+## Known limitations
 
-| Test | Old model (0–100 plain) | New model (0–999 padded+reversed) |
-|---|---|---|
-| Random pair, in-distribution | 99.5% | 100% |
-| Random pair, full operand range | 27% (across 0–999) | **100%** |
-| 1-digit pairs | 99.5% | 100% |
-| 2-digit pairs | 99.5% | 100% |
-| 3-digit pairs | 0% | **100%** |
-| Edge cases (999+999, 100−1, 500+500) | mostly wrong | all correct |
-
-Each held-out pair in the test set is almost certainly absent from
-training (40K samples out of 10⁶ possibilities). 100% on those means
-the model has learned an *algorithm*, not a *table*.
-
-## What's not solved
-
-- **Operands wider than the trained width.** Position 12 was never
-  occupied during training, so the model has no positional embedding
-  for it. Generalization past the padding width requires additional
-  tricks — randomized PEs, NoPE, or Abacus-style position-of-digit
-  embeddings (Lee et al., 2024).
-
-- **Multiplication, division.** The carry algorithm here is
-  position-local with single-bit state. Multiplication has cross-position
-  dependencies (each partial product affects multiple places) that this
-  setup doesn't address.
-
-- **Negative results.** Subtraction examples in training keep `a ≥ b`,
-  so the model has never seen a negative answer.
-
-These are all natural next steps if you want to push the demo further.
+- Operands wider than the configured width are out of distribution.
+- Subtraction is restricted to nonnegative results.
+- Multiplication and division are not represented.
+- Learned absolute positions may encourage shortcuts tied to the fixed layout.
+- A model artifact and benchmark report must be published before results are
+  independently reproducible.
 
 ## References
 
-- Lee, Y. et al. *Teaching Arithmetic to Small Transformers.* 2023.
-  https://arxiv.org/abs/2307.03381
-- Nogueira, R. et al. *Investigating the Limitations of Transformers with
-  Simple Arithmetic Tasks.* 2021. https://arxiv.org/abs/2102.13019
-- McLeish, S. et al. *Transformers Can Do Arithmetic with the Right
-  Embeddings (Abacus).* 2024. https://arxiv.org/abs/2405.17399
-
-The reverse-answer trick has been independently reported in all three
-papers; the zero-pad-and-align-positions formulation is the most
-practical for a small from-scratch GPT-2 model.
+- Lee et al., *Teaching Arithmetic to Small Transformers* (2023),
+  <https://arxiv.org/abs/2307.03381>
+- Nogueira et al., *Investigating the Limitations of Transformers with Simple
+  Arithmetic Tasks* (2021), <https://arxiv.org/abs/2102.13019>
+- McLeish et al., *Transformers Can Do Arithmetic with the Right Embeddings*
+  (2024), <https://arxiv.org/abs/2405.17399>
