@@ -22,8 +22,8 @@ the answer changes the generation order to units, tens, hundreds, and so on:
         ^ units digit first
 ```
 
-Zero-padding operands to a fixed width also assigns each place value a stable
-absolute position:
+Using fixed-width fields zero-pads both operands to `W` digits and the answer to
+`W + 1` digits. This assigns each place value a stable absolute position:
 
 ```text
 007+008=5100
@@ -59,7 +59,9 @@ A credible result must satisfy all of the following:
 2. Keep commutative addition twins such as `012+034` and `034+012` in the same
    split.
 3. Sample benchmark tasks without replacement.
-4. Verify exact zero overlap with every task used for training or validation.
+4. Verify zero semantic overlap with every task used for training or validation:
+   addition twins share a sorted-operand group, while subtraction remains
+   directional.
 5. Save dataset/split hashes, configuration, seed, package versions, Git revision,
    and metrics with the model.
 6. Decode outputs according to the model's task format before computing numerical
@@ -67,9 +69,10 @@ A credible result must satisfy all of the following:
 7. Report exact sequence match, numerical accuracy, format validity, and EOS
    behavior separately.
 
-`lib/benchmark.py` implements deterministic held-out sampling. `demo.py` uses it
-to select 100 unique tasks from each of the one-, two-, and three-digit operand
-buckets after excluding the committed training dataset.
+`lib/benchmark.py` implements deterministic held-out sampling. `demo.py` uses
+benchmark seed 42 to select 100 unique tasks from each of the one-, two-, and
+three-digit operand buckets after excluding the committed training dataset. The
+benchmark seed stays fixed while training seeds vary.
 
 ## What can be concluded
 
@@ -82,15 +85,43 @@ accuracy statement.
 The strongest experimental comparison should be a controlled ablation using the
 same architecture, data budget, task space, splits, and seeds:
 
-| Condition | Padded operands | Reversed answer |
+| Condition | Fixed-width operands and answer | Reversed answer |
 |---|---:|---:|
 | Plain baseline | no | no |
 | Reverse only | no | yes |
-| Padding only | yes | no |
+| Fixed-width only | yes | no |
 | Combined | yes | yes |
 
 Run each condition over multiple seeds and report the distribution, not only the
 best run.
+
+This matrix compares whole representations, not operand padding in isolation.
+With answer-only loss, minimal-layout answers contain a variable number of target
+digits, while fixed-width answers always contain `W + 1`; EOS is supervised in
+both cases. Each run report must include the number of supervised answer tokens
+and EOS targets in its training and validation splits. A causal claim about
+fixed-width layout independent of target-token budget would require a separate
+matched-budget design.
+
+The experiment plan and result set should be plain versioned files. Declare all
+conditions and seeds in advance, publish an immutable report for every run, and
+retain failures and low-accuracy outcomes. A small model scoring poorly is still a
+valid experimental result when its data, configuration, artifact, and evaluation
+provenance are intact; it should not be silently rerun or omitted.
+
+Every planned cell must produce a status record. Completed records bind the model,
+training manifest, normalized train/validation rosters, and evaluation output to
+the declared benchmark-manifest hash. Failed records retain the stage, error or
+exit status, configuration, Git revision, and available logs or partial-artifact
+hashes. Completed reports include exact match, numerical accuracy, strict format,
+EOS behavior, and counts with denominators by operation, operand-width bucket,
+carry/borrow count and chain length, overflow, zero operand, and equal operands.
+
+Reinforcement learning is deferred until after the supervised four-way baseline
+is complete. Any later RL study needs its own predeclared reward, optimization,
+seed, stopping, and failure-reporting protocol while keeping the benchmark
+manifest frozen and outside reward selection. No RL implementation or result is
+claimed here.
 
 ## Known limitations
 

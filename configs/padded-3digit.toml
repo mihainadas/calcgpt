@@ -1,6 +1,8 @@
 # Canonical experiment specification. The current CLIs do not consume this file
 # directly; it is the reviewable source of truth for reproduction commands.
 
+schema_version = 1
+
 [run]
 name = "padded-3digit"
 description = "Fixed-width, zero-padded operands with reversed answers"
@@ -32,11 +34,14 @@ weight_decay = 0.01
 save_steps = 2000
 test_split = 0.2
 seed = 42
+split_seed = 42
 augmentation = false
+loss_scope = "answer-only"
 
 [evaluation]
 operand_width = 3
 samples_per_digit_bucket = 100
+# Keep the benchmark fixed while training seeds vary.
 seed = 42
 require_disjoint_training_pairs = true
 decoding = "greedy"

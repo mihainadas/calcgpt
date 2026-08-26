@@ -28,7 +28,13 @@ Deterministic generation requires both a fixed pseudo-random seed and stable ord
 
 ## Evaluation hygiene
 
-Random sampling alone does not create a guaranteed holdout. Evaluation code must compare normalized operand/operator tuples against the complete training set and reject overlaps. Reports should state the universe, sampling procedure, seed, exclusions, and final count.
+Random sampling alone does not create a guaranteed holdout. Evaluation code must
+compare semantic task groups against the complete training set: addition groups
+use the sorted operand pair, while subtraction remains directional. The canonical
+width-3 benchmark uses seed 42, fixed independently of training seeds. Its
+versioned manifest must record the exclusion policy, excluded-training-roster
+hash, evaluation-roster hash, sampling procedure, seed, and final count. Every
+published run report must bind to that exact benchmark-manifest hash.
 
 ## Storage policy
 

@@ -57,12 +57,52 @@ class GeneratorTests(unittest.TestCase):
             digests = [hashlib.sha256(path.read_bytes()).digest() for path in paths]
             self.assertEqual(digests[0], digests[1])
 
-    def test_committed_dataset_matches_canonical_generation(self):
-        expected = "\n".join(sample_examples(40_000, 3, seed=42)) + "\n"
-        actual = (ROOT / "datasets" / "ds-calcgpt-padded.txt").read_text(
-            encoding="utf-8"
+    def test_cli_defaults_are_the_width_three_canonical_parameters(self):
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "gen_padded.py"), "--help"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
         )
+        self.assertIn("default 3", result.stdout)
+
+    def test_committed_dataset_matches_canonical_generation(self):
+        expected = ("\n".join(sample_examples(40_000, 3, seed=42)) + "\n").encode(
+            "utf-8"
+        )
+        actual = (ROOT / "datasets" / "ds-calcgpt-padded.txt").read_bytes()
         self.assertEqual(actual, expected)
+        self.assertNotIn(b"\r\n", actual)
+        self.assertTrue(actual.endswith(b"\n"))
+
+    def test_cli_writes_explicit_utf8_lf_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "dataset.txt"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "gen_padded.py"),
+                    "-n",
+                    "25",
+                    "-w",
+                    "2",
+                    "--seed",
+                    "7",
+                    "--output",
+                    str(output),
+                ],
+                cwd=directory,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            expected = ("\n".join(sample_examples(25, 2, seed=7)) + "\n").encode(
+                "utf-8"
+            )
+            actual = output.read_bytes()
+        self.assertEqual(actual, expected)
+        self.assertNotIn(b"\r", actual)
 
 
 if __name__ == "__main__":

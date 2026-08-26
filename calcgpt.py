@@ -109,7 +109,7 @@ def batch_mode(
     output_format: str,
     output_file: Optional[str],
     quiet: bool = False,
-):
+) -> int:
     """Run CalcGPT in batch mode"""
     if not problems:
         raise ValueError("batch mode requires at least one problem")
@@ -198,6 +198,8 @@ def batch_mode(
             
             print(f"{Colors.GREEN}📄 Results saved to: {output_file}{Colors.ENDC}")
 
+    return errors
+
 def main():
     parser = argparse.ArgumentParser(
         description="CalcGPT - Arithmetic language model CLI tool",
@@ -234,8 +236,8 @@ Examples:
                        help='Read problems from file (one per line)')
     
     # Generation parameters
-    parser.add_argument('-t', '--temperature', type=float, default=0.1,
-                       help='Sampling temperature (default: 0.1, use 0 for greedy)')
+    parser.add_argument('-t', '--temperature', type=float, default=0.0,
+                       help='Sampling temperature (default: 0 for greedy)')
     parser.add_argument('--max-tokens', type=int, default=10,
                        help='Maximum tokens to generate (default: 10)')
     
@@ -266,7 +268,15 @@ Examples:
     )
     quiet = args.quiet or machine_output
 
-    from lib.inference import CalcGPT, get_model_path
+    try:
+        from lib.inference import CalcGPT, get_model_path
+    except ModuleNotFoundError as exc:
+        print(
+            f"CalcGPT inference dependencies are unavailable ({exc}). "
+            'Install them with: python -m pip install ".[train]"',
+            file=sys.stderr,
+        )
+        return 1
     
     # Print banner unless suppressed
     if not quiet:
@@ -281,7 +291,7 @@ Examples:
             else:
                 print(f"{Colors.CYAN}📁 Using model: {model_path}{Colors.ENDC}")
     except FileNotFoundError as e:
-        print(f"{Colors.FAIL}❌ {e}{Colors.ENDC}")
+        print(f"{Colors.FAIL}❌ {e}{Colors.ENDC}", file=sys.stderr)
         return 1
     
     # Create configuration
@@ -299,22 +309,32 @@ Examples:
             legacy_dataset_path=args.legacy_dataset,
         )
     except Exception as e:
-        print(f"{Colors.FAIL}❌ Error initializing CalcGPT: {e}{Colors.ENDC}")
+        print(
+            f"{Colors.FAIL}❌ Error initializing CalcGPT: {e}{Colors.ENDC}",
+            file=sys.stderr,
+        )
         return 1
     
     # Determine mode and execute
     try:
         if args.batch is not None:
             # Batch mode with command line problems
-            batch_mode(calcgpt, args.batch, args.format, args.output, quiet=quiet)
+            errors = batch_mode(calcgpt, args.batch, args.format, args.output, quiet=quiet)
+            if errors:
+                return 1
         elif args.file:
             # Batch mode with file input
             try:
                 with open(args.file, 'r') as f:
                     problems = [line.strip() for line in f if line.strip()]
-                batch_mode(calcgpt, problems, args.format, args.output, quiet=quiet)
+                errors = batch_mode(calcgpt, problems, args.format, args.output, quiet=quiet)
+                if errors:
+                    return 1
             except Exception as e:
-                print(f"{Colors.FAIL}❌ Error reading file: {e}{Colors.ENDC}")
+                print(
+                    f"{Colors.FAIL}❌ Error reading file: {e}{Colors.ENDC}",
+                    file=sys.stderr,
+                )
                 return 1
         else:
             # Interactive mode (default)
@@ -323,10 +343,13 @@ Examples:
         return 0
         
     except KeyboardInterrupt:
-        print(f"\n{Colors.WARNING}⚠️ Interrupted by user{Colors.ENDC}")
+        print(
+            f"\n{Colors.WARNING}⚠️ Interrupted by user{Colors.ENDC}",
+            file=sys.stderr,
+        )
         return 1
     except Exception as e:
-        print(f"{Colors.FAIL}❌ Unexpected error: {e}{Colors.ENDC}")
+        print(f"{Colors.FAIL}❌ Unexpected error: {e}{Colors.ENDC}", file=sys.stderr)
         if not quiet:
             import traceback
             traceback.print_exc()

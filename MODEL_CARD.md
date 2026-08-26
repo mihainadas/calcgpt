@@ -6,7 +6,7 @@ CalcGPT is an educational arithmetic-language-model experiment, not a production
 
 ## Model family
 
-CalcGPT uses a small GPT-2-style causal transformer trained from scratch on character sequences. The primary experiment uses fixed-width, zero-padded operands and reverses the answer so decoding follows the direction of arithmetic carries.
+CalcGPT uses a small GPT-2-style causal transformer trained from scratch on character sequences. The primary experiment uses fixed-width, zero-padded operands and answers, then reverses the answer so decoding follows the direction of arithmetic carries.
 
 The canonical architecture and training settings are recorded in [`configs/padded-3digit.toml`](configs/padded-3digit.toml).
 
@@ -30,16 +30,41 @@ Training data is synthetic. See [DATA_CARD.md](DATA_CARD.md) for formats, genera
 
 ## Evaluation
 
-Published artifacts must be evaluated on an explicitly disjoint set of operand/operator tuples. An evaluation report should include:
+Published artifacts must be evaluated on a semantically disjoint task roster:
+commutative addition twins share one exclusion group, while subtraction remains
+directional. An evaluation report should include:
 
 - Model and dataset SHA-256 checksums.
 - Git revision and experiment configuration.
 - Evaluation seed, sample size, and decoding parameters.
+- The immutable benchmark-manifest SHA-256 and evaluation-roster SHA-256.
 - Accuracy by operation and operand-width bucket.
-- Format validity, exact match, and arithmetic correctness.
+- Format validity, exact match, arithmetic correctness, EOS behavior, and
+  carry/borrow strata with counts and denominators.
+- Supervised answer-token and EOS-target counts for each training split; minimal
+  and fixed-width layouts do not expose the same number of answer targets.
 - Hardware and dependency versions.
+- The complete planned training-seed set, including failed and low-accuracy runs.
 
 Existing prose results in the repository should be treated as historical observations until accompanied by such an artifact and report.
+
+For multi-seed ablations, publish one immutable report per representation and seed
+plus a compact summary over every planned run. Do not select the best seed as the
+headline result. A low score is valid evidence about the tested condition; it is
+not a pipeline failure when the artifact and evaluation contracts remain valid.
+
+The four-way baseline is a whole-representation comparison: fixed-width layout
+pads both operands and answers, so it changes positions and answer-token counts.
+It does not isolate operand padding under a matched token budget.
+
+Every planned run needs a `completed` or `failed` record. Failed records preserve
+the failed stage, error or exit status, configuration, Git revision, and any
+available diagnostics instead of being replaced by an unplanned rerun.
+
+Reinforcement learning is outside the current model and evidence scope. A later
+post-baseline RL experiment would require a separate predeclared reward and
+optimization protocol while retaining the frozen benchmark manifest solely for
+evaluation.
 
 ## Limitations
 

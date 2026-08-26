@@ -58,8 +58,8 @@ def validate_arguments(args) -> None:
     if args.operand_width is not None and args.operand_width < 1:
         errors.append("operand-width must be positive")
 
-    if args.task_format == "padded-reversed" and args.operand_width is None:
-        errors.append("operand-width is required for padded-reversed format")
+    if args.operand_width is None:
+        errors.append("operand-width is required for every task format")
     
     if not Path(args.dataset).exists():
         errors.append(f"dataset file not found: {args.dataset}")
@@ -91,10 +91,12 @@ def create_config_from_args(args):
         save_steps=args.save_steps,
         test_split=args.test_split,
         seed=args.seed,
+        split_seed=args.split_seed,
         no_augmentation=args.no_augmentation,
         n_positions=args.n_positions,
         task_format=args.task_format,
         operand_width=args.operand_width,
+        loss_scope=args.loss_scope,
     )
 
 
@@ -223,6 +225,13 @@ Examples:
     )
 
     parser.add_argument(
+        '--split-seed',
+        type=int,
+        default=None,
+        help='Validation split seed (default: use --seed for compatibility)'
+    )
+
+    parser.add_argument(
         '--n-positions',
         type=int,
         default=None,
@@ -231,7 +240,7 @@ Examples:
 
     parser.add_argument(
         '--task-format',
-        choices=['plain', 'padded-reversed'],
+        choices=['plain', 'reversed', 'padded', 'padded-reversed'],
         default='plain',
         help='Arithmetic representation stored in the model manifest',
     )
@@ -239,8 +248,15 @@ Examples:
     parser.add_argument(
         '--operand-width',
         type=int,
-        default=None,
-        help='Fixed operand width for padded-reversed models',
+        default=3,
+        help='Maximum operand width and fixed width when padded (default: 3)',
+    )
+
+    parser.add_argument(
+        '--loss-scope',
+        choices=['full-sequence', 'answer-only'],
+        default='full-sequence',
+        help='Tokens included in the language-model loss (default: full-sequence)',
     )
     
     # Utility options
@@ -261,10 +277,17 @@ Examples:
     # Validate arguments
     validate_arguments(args)
     
-    # Create configuration
-    config = create_config_from_args(args)
-
-    from lib.train import CalcGPTTrainer
+    # Import the optional ML stack only after dependency-light argument validation.
+    try:
+        config = create_config_from_args(args)
+        from lib.train import CalcGPTTrainer
+    except ModuleNotFoundError as exc:
+        print(
+            f"CalcGPT training dependencies are unavailable ({exc}). "
+            'Install them with: python -m pip install ".[train]"',
+            file=sys.stderr,
+        )
+        return 1
     
     # Setup paths
     dataset_path = Path(args.dataset)
@@ -280,6 +303,8 @@ Examples:
         print(f"  🔧 Data augmentation: {'Disabled' if config.no_augmentation else 'Enabled'}")
         print(f"  📊 Test split: {config.test_split:.1%}")
         print(f"  🧾 Task format: {config.task_format}")
+        print(f"  🎯 Loss scope: {config.loss_scope}")
+        print(f"  ✂️  Split seed: {config.split_seed}")
         print()
     
     try:

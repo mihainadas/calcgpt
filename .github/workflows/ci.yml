@@ -53,3 +53,12 @@ jobs:
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Build and verify source distribution
+        if: matrix.python-version == '3.11'
+        run: |
+          python -m build
+          mkdir -p /tmp/calcgpt-sdist
+          tar -xzf dist/calc_gpt-*.tar.gz --strip-components=1 -C /tmp/calcgpt-sdist
+          cd /tmp/calcgpt-sdist
+          python -m unittest discover -s tests -p "test_*.py" -v

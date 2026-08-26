@@ -48,7 +48,7 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_canonical_demo_benchmark_is_absent_from_training_dataset(self):
         excluded = load_examples(ROOT / "datasets" / "ds-calcgpt-padded.txt")
-        tasks = sample_heldout_by_magnitude(100, 3, excluded, seed=0)
+        tasks = sample_heldout_by_magnitude(100, 3, excluded, seed=42)
         excluded_tasks = {parse_example(example) for example in excluded}
         self.assertEqual(len(tasks), 300)
         self.assertEqual(len(set(tasks)), 300)
@@ -57,7 +57,7 @@ class BenchmarkTests(unittest.TestCase):
         )
 
     def test_rejects_when_bucket_is_exhausted(self):
-        all_tasks = sample_heldout_tasks(155, 1, [], seed=0)
+        all_tasks = sample_heldout_tasks(110, 1, [], seed=0)
         excluded = [format_task(task, 1) for task in all_tasks]
         with self.assertRaises(ValueError):
             sample_heldout_tasks(1, 1, excluded, seed=0)

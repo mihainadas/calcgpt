@@ -29,78 +29,32 @@ Reversing the answer lets the decoder emit units first (carries flow
 naturally left to right in the output sequence).
 """
 
+# ruff: noqa: E402
+
 import argparse
-import math
-import random
+import sys
 from pathlib import Path
 
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-def task_space_size(operand_width: int) -> int:
-    """Return the number of distinct addition and nonnegative-subtraction tasks."""
-    if operand_width <= 0:
-        raise ValueError("operand_width must be positive")
-    operand_count = 10 ** operand_width
-    additions = operand_count * operand_count
-    subtractions = operand_count * (operand_count + 1) // 2
-    return additions + subtractions
-
-
-def _task_from_id(task_id: int, operand_width: int) -> tuple[int, int, str]:
-    """Map a dense task ID to one task without materializing the task space."""
-    operand_count = 10 ** operand_width
-    additions = operand_count * operand_count
-    if task_id < additions:
-        return task_id // operand_count, task_id % operand_count, "+"
-
-    # Subtraction rows have lengths 1, 2, ..., operand_count for a=0,1,...
-    subtraction_id = task_id - additions
-    a = (math.isqrt(8 * subtraction_id + 1) - 1) // 2
-    row_start = a * (a + 1) // 2
-    b = subtraction_id - row_start
-    return a, b, "-"
+from lib.benchmark import sample_task_roster, task_space_size
+from lib.representation import RepresentationSpec
 
 
 def format_example(a: int, b: int, op: str, operand_width: int, answer_width: int) -> str:
-    if operand_width <= 0 or answer_width <= 0:
-        raise ValueError("operand_width and answer_width must be positive")
-    if op not in {"+", "-"}:
-        raise ValueError("op must be '+' or '-'")
-    limit = 10 ** operand_width
-    if not (0 <= a < limit and 0 <= b < limit):
-        raise ValueError("operands must be nonnegative and fit operand_width")
-    if op == "-" and a < b:
-        raise ValueError("subtraction tasks must have a >= b")
-    if op == "+":
-        r = a + b
-    else:
-        r = a - b
-    a_s = str(a).zfill(operand_width)
-    b_s = str(b).zfill(operand_width)
-    r_s = str(r).zfill(answer_width)
-    return f"{a_s}{op}{b_s}={r_s[::-1]}"
+    if answer_width != operand_width + 1:
+        raise ValueError("answer_width must equal operand_width + 1")
+    spec = RepresentationSpec.from_name("padded-reversed", operand_width)
+    return spec.format_task((a, op, b))
 
 
 def sample_examples(
     n: int, operand_width: int, seed: int
 ) -> list[str]:
-    if n <= 0:
-        raise ValueError("n must be positive")
-    capacity = task_space_size(operand_width)
-    if n > capacity:
-        raise ValueError(
-            f"requested {n:,} examples, but width {operand_width} has "
-            f"only {capacity:,} distinct tasks"
-        )
-
-    rng = random.Random(seed)
-    # The largest sum has at most one more digit than either operand.
-    answer_width = operand_width + 1
-    task_ids = rng.sample(range(capacity), n)
-    return [
-        format_example(a, b, op, operand_width, answer_width)
-        for task_id in task_ids
-        for a, b, op in [_task_from_id(task_id, operand_width)]
-    ]
+    roster = sample_task_roster(n, operand_width, seed)
+    spec = RepresentationSpec.from_name("padded-reversed", operand_width)
+    return spec.render_dataset(roster)
 
 
 def main() -> int:
@@ -110,8 +64,8 @@ def main() -> int:
         "-w",
         "--operand-width",
         type=int,
-        default=7,
-        help="Zero-pad operands to this many digits (default 7)",
+        default=3,
+        help="Zero-pad operands to this many digits (default 3)",
     )
     parser.add_argument(
         "-o",
@@ -129,11 +83,14 @@ def main() -> int:
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    with args.output.open("w") as f:
-        f.write("\n".join(examples) + "\n")
+    dataset_bytes = ("\n".join(examples) + "\n").encode("utf-8")
+    args.output.write_bytes(dataset_bytes)
 
     print(f"wrote {len(examples):,} examples -> {args.output}")
-    print(f"operand width: {args.operand_width} digits  (max value {10**args.operand_width - 1:,})")
+    print(
+        f"operand width: {args.operand_width} digits  "
+        f"(max value {10**args.operand_width - 1:,})"
+    )
     print(f"task space: {task_space_size(args.operand_width):,} distinct tasks")
     print(f"sequence length: {len(examples[0])} characters")
     print("first 5 samples:")

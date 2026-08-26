@@ -27,8 +27,33 @@ from transformers import (
 )
 
 from .data import augment_data, load_dataset, split_examples_grouped
+from .representation import RepresentationSpec, task_roster_sha256
 from .tokenizer import CalcGPTTokenizer
 from .version import __version__
+
+
+def _git_provenance(source_root: Path) -> Tuple[Optional[str], Optional[bool]]:
+    """Return commit and dirty state only for the repository containing this source."""
+    if not (source_root / ".git").exists():
+        return None, None
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(
+                ["git", "-C", str(source_root), "status", "--porcelain"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+        return commit, dirty
+    except (OSError, subprocess.CalledProcessError):
+        return None, None
 
 
 @dataclass
@@ -46,10 +71,18 @@ class TrainingConfig:
     save_steps: int = 1000
     test_split: float = 0.2
     seed: int = 42
+    split_seed: Optional[int] = None
     no_augmentation: bool = False
     n_positions: Optional[int] = None  # explicit context window; defaults to maxlen+10
     task_format: str = "plain"
-    operand_width: Optional[int] = None
+    operand_width: int = 3
+    loss_scope: str = "full-sequence"
+
+    def __post_init__(self) -> None:
+        if self.split_seed is None:
+            self.split_seed = self.seed
+        if self.loss_scope not in {"full-sequence", "answer-only"}:
+            raise ValueError("loss_scope must be 'full-sequence' or 'answer-only'")
 
 
 def seed_everything(seed: int) -> None:
@@ -77,7 +110,15 @@ def detect_device() -> Tuple[str, bool]:
 class OptimizedDataset(Dataset):
     """Pre-tokenized dataset for faster training"""
     
-    def __init__(self, data: List[str], maxlen: int, tokenizer: CalcGPTTokenizer):
+    def __init__(
+        self,
+        data: List[str],
+        maxlen: int,
+        tokenizer: CalcGPTTokenizer,
+        loss_scope: str = "full-sequence",
+    ):
+        if loss_scope not in {"full-sequence", "answer-only"}:
+            raise ValueError("loss_scope must be 'full-sequence' or 'answer-only'")
         self.tokenizer = tokenizer
         self.data: List[Dict[str, List[int]]] = []
         
@@ -88,6 +129,14 @@ class OptimizedDataset(Dataset):
             padded = encoded + [tokenizer.pad_token_id] * (maxlen - len(encoded))
             attention_mask = [1] * len(encoded) + [0] * (maxlen - len(encoded))
             labels = encoded + [-100] * (maxlen - len(encoded))
+            if loss_scope == "answer-only":
+                prompt, separator, _ = example.partition("=")
+                if not separator:
+                    raise ValueError(f"answer-only example has no '=' separator: {example!r}")
+                prompt_length = len(
+                    tokenizer.encode(prompt + separator, add_eos=False)
+                )
+                labels[:prompt_length] = [-100] * prompt_length
             self.data.append(
                 {
                     "input_ids": padded,
@@ -160,6 +209,10 @@ class CalcGPTTrainer:
         self.trainer = None
         self.train_examples: List[str] = []
         self.validation_examples: List[str] = []
+        self.representation_spec = RepresentationSpec.from_name(
+            self.config.task_format, self.config.operand_width
+        )
+        self.task_roster: List[Tuple[int, str, int]] = []
         
     def log(self, message: str):
         """Log message if verbose mode is enabled"""
@@ -173,11 +226,17 @@ class CalcGPTTrainer:
         self.log(f"Loaded {len(self.examples)} examples")
         
         # Create tokenizer
+        self.task_roster = self.representation_spec.validate_dataset(self.examples)
         self.tokenizer = CalcGPTTokenizer(self.examples)
         self.log(f"Vocabulary created with {self.tokenizer.vocab_size} tokens")
         
         # Store max length
         self.maxlen = self.tokenizer.max_length
+        if self.config.n_positions is not None and self.config.n_positions < self.maxlen:
+            raise ValueError(
+                f"n_positions={self.config.n_positions} is smaller than the longest "
+                f"encoded training sequence ({self.maxlen})"
+            )
         self.log(f"Maximum sequence length: {self.maxlen}")
     
     def create_datasets(self) -> Tuple[OptimizedDataset, Optional[OptimizedDataset]]:
@@ -187,7 +246,7 @@ class CalcGPTTrainer:
             Tuple of (train_dataset, val_dataset)
         """
         train_examples, val_examples = split_examples_grouped(
-            self.examples, self.config.test_split, self.config.seed
+            self.examples, self.config.test_split, self.config.split_seed
         )
         if not self.config.no_augmentation:
             original_count = len(train_examples)
@@ -197,13 +256,23 @@ class CalcGPTTrainer:
         else:
             self.log("Data augmentation disabled")
 
+        # Augmented rows are generated after the initial dataset audit, so validate
+        # both actual training partitions before constructing a model.
+        self.representation_spec.validate_dataset(train_examples)
+        if val_examples:
+            self.representation_spec.validate_dataset(val_examples)
+
         self.train_examples = train_examples
         self.validation_examples = val_examples
         self.log(f"Training examples: {len(train_examples)}")
         self.log(f"Validation examples: {len(val_examples)}")
-        train_dataset = OptimizedDataset(train_examples, self.maxlen, self.tokenizer)
+        train_dataset = OptimizedDataset(
+            train_examples, self.maxlen, self.tokenizer, self.config.loss_scope
+        )
         val_dataset = (
-            OptimizedDataset(val_examples, self.maxlen, self.tokenizer)
+            OptimizedDataset(
+                val_examples, self.maxlen, self.tokenizer, self.config.loss_scope
+            )
             if val_examples
             else None
         )
@@ -278,17 +347,14 @@ class CalcGPTTrainer:
         """
         self.log("\n=== QUICK TEST ===")
         self.model.eval()
-        if self.config.task_format == "padded-reversed":
-            width = self.config.operand_width or 1
-            test_prompts = [
-                f"{left:0{width}d}+{right:0{width}d}="
-                for left, right in ((1, 1), (2, 3), (5, 0))
-            ]
-        else:
-            test_prompts = ["1+1=", "2+3=", "5+0="]
+        test_prompts = [
+            self.representation_spec.format_task((left, "+", right)).split("=", 1)[0]
+            + "="
+            for left, right in ((1, 1), (2, 3), (5, 0))
+        ]
         quick_test_tokens = (
-            (self.config.operand_width or 1) + 1
-            if self.config.task_format == "padded-reversed"
+            self.representation_spec.answer_width
+            if self.representation_spec.answer_width is not None
             else 5
         )
         results = {}
@@ -324,15 +390,8 @@ class CalcGPTTrainer:
     ) -> None:
         """Write provenance required to reproduce and audit a model artifact."""
         dataset_bytes = self.dataset_path.read_bytes()
-        try:
-            git_commit = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-        except (OSError, subprocess.CalledProcessError):
-            git_commit = None
+        source_root = Path(__file__).resolve().parents[1]
+        git_commit, git_dirty = _git_provenance(source_root)
 
         def package_version(name: str) -> Optional[str]:
             try:
@@ -344,22 +403,33 @@ class CalcGPTTrainer:
             payload = ("\n".join(examples) + "\n").encode("utf-8")
             return hashlib.sha256(payload).hexdigest()
 
+        def roster_hash(examples: List[str]) -> str:
+            return task_roster_sha256(
+                self.representation_spec.parse_example(example)
+                for example in examples
+            )
+
+        def target_counts(examples: List[str]) -> Dict[str, int]:
+            answer_tokens = 0
+            total_tokens = 0
+            for example in examples:
+                _, answer = example.split("=", 1)
+                answer_count = len(self.tokenizer.encode(answer, add_eos=False))
+                answer_tokens += answer_count
+                total_tokens += (
+                    answer_count + 1
+                    if self.config.loss_scope == "answer-only"
+                    else len(self.tokenizer.encode(example, add_eos=True))
+                )
+            return {
+                "active_target_tokens": total_tokens,
+                "active_answer_tokens": answer_tokens,
+                "active_eos_tokens": len(examples),
+            }
+
         task_spec = {
-            "schema_version": 1,
-            "format": self.config.task_format,
-            "operand_width": self.config.operand_width,
-            "answer_order": (
-                "reversed"
-                if self.config.task_format == "padded-reversed"
-                else "normal"
-            ),
-            "answer_width": (
-                self.config.operand_width + 1
-                if self.config.operand_width is not None
-                else None
-            ),
-            "operators": ["+", "-"],
-            "negative_results": False,
+            **self.representation_spec.to_dict(),
+            "task_roster_sha256": task_roster_sha256(self.task_roster),
         }
         (self.output_dir / "task_spec.json").write_text(
             json.dumps(task_spec, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -370,17 +440,30 @@ class CalcGPTTrainer:
             "calcgpt_version": __version__,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "git_commit": git_commit,
+            "git_dirty": git_dirty,
             "dataset": {
                 "path": str(self.dataset_path),
                 "sha256": hashlib.sha256(dataset_bytes).hexdigest(),
                 "examples": len(self.examples),
+                "task_roster_sha256": task_roster_sha256(self.task_roster),
             },
             "splits": {
                 "train_examples": len(self.train_examples),
                 "validation_examples": len(self.validation_examples),
                 "train_sha256": examples_hash(self.train_examples),
                 "validation_sha256": examples_hash(self.validation_examples),
+                "train_task_roster_sha256": roster_hash(self.train_examples),
+                "validation_task_roster_sha256": roster_hash(
+                    self.validation_examples
+                ),
                 "grouped_by_commutative_equivalence": True,
+            },
+            "target_tokens": {
+                "schema": "calcgpt-target-token-counts",
+                "schema_version": 1,
+                "loss_scope": self.config.loss_scope,
+                "train": target_counts(self.train_examples),
+                "validation": target_counts(self.validation_examples),
             },
             "task_spec": task_spec,
             "training_config": asdict(self.config),
@@ -393,6 +476,7 @@ class CalcGPTTrainer:
                 "python": platform.python_version(),
                 "torch": package_version("torch"),
                 "transformers": package_version("transformers"),
+                "accelerate": package_version("accelerate"),
                 "platform": platform.platform(),
                 "device": self.device,
             },

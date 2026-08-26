@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 from transformers import GPT2LMHeadModel
 
+from .representation import REPRESENTATION_SCHEMA, RepresentationSpec
 from .tokenizer import TOKENIZER_FILENAME, CalcGPTTokenizer
 
 PathLike = Union[str, Path]
@@ -23,7 +24,7 @@ TASK_SPEC_FILENAME = "task_spec.json"
 class InferenceConfig:
     """Configuration for inference parameters."""
 
-    temperature: float = 0.1
+    temperature: float = 0.0
     max_tokens: int = 10
     device: str = "auto"
     show_tokens: bool = False
@@ -169,7 +170,24 @@ def _load_task_spec(model_path: Path, loaded_model_path: Path) -> Dict[str, Any]
         raise ValueError(f"Invalid task specification {artifact_path}: {exc}") from exc
     if not isinstance(task_spec, dict):
         raise ValueError(f"Invalid task specification {artifact_path}: expected an object")
-    if task_spec.get("schema_version") != 1:
+    if task_spec.get("schema") == REPRESENTATION_SCHEMA:
+        try:
+            RepresentationSpec.from_dict(task_spec)
+        except ValueError as exc:
+            raise ValueError(f"Invalid task specification {artifact_path}: {exc}") from exc
+        roster_hash = task_spec.get("task_roster_sha256")
+        if roster_hash is not None and (
+            not isinstance(roster_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", roster_hash) is None
+        ):
+            raise ValueError(
+                f"Invalid task specification {artifact_path}: bad task_roster_sha256"
+            )
+        return task_spec
+
+    # Explicit compatibility path for artifacts created before the orthogonal
+    # representation schema. New training runs never write this shape.
+    if task_spec.get("schema_version") not in {0, 1}:
         raise ValueError(
             f"Invalid task specification {artifact_path}: unsupported schema version"
         )
@@ -180,10 +198,18 @@ def _load_task_spec(model_path: Path, loaded_model_path: Path) -> Dict[str, Any]
         )
     if task_spec.get("answer_order") not in {"normal", "reversed"}:
         raise ValueError(f"Invalid task specification {artifact_path}: bad answer_order")
-    if task_spec.get("operators") != ["+", "-"]:
+    operators = task_spec.get("operators")
+    if (
+        not isinstance(operators, list)
+        or not operators
+        or any(operator not in {"+", "-"} for operator in operators)
+        or len(set(operators)) != len(operators)
+    ):
         raise ValueError(f"Invalid task specification {artifact_path}: bad operators")
     if not isinstance(task_spec.get("negative_results"), bool):
         raise ValueError(f"Invalid task specification {artifact_path}: bad negative_results")
+    if task_spec["negative_results"]:
+        raise ValueError(f"Invalid task specification {artifact_path}: negative results")
     if task_format == "padded-reversed":
         width = task_spec.get("operand_width")
         answer_width = task_spec.get("answer_width")
@@ -191,7 +217,28 @@ def _load_task_spec(model_path: Path, loaded_model_path: Path) -> Dict[str, Any]
             raise ValueError(f"Invalid task specification {artifact_path}: bad operand_width")
         if answer_width != width + 1:
             raise ValueError(f"Invalid task specification {artifact_path}: bad answer_width")
+        if task_spec.get("answer_order") != "reversed":
+            raise ValueError(f"Invalid task specification {artifact_path}: conflicting format")
+    elif (
+        task_spec.get("answer_order") != "normal"
+        or task_spec.get("operand_width") is not None
+        or task_spec.get("answer_width") is not None
+    ):
+        raise ValueError(f"Invalid task specification {artifact_path}: conflicting format")
     return task_spec
+
+
+def _representation_from_task_spec(
+    task_spec: Dict[str, Any],
+) -> Optional[RepresentationSpec]:
+    """Return the representation contract, retaining legacy plain compatibility."""
+    if task_spec.get("schema") == REPRESENTATION_SCHEMA:
+        return RepresentationSpec.from_dict(task_spec)
+    if task_spec.get("format") == "padded-reversed":
+        return RepresentationSpec.from_name(
+            "padded-reversed", task_spec["operand_width"]
+        )
+    return None
 
 
 def validate_tokenizer_compatibility(tokenizer: CalcGPTTokenizer, model: Any) -> None:
@@ -265,11 +312,13 @@ class CalcGPT:
         self.model = None
         self.tokenizer = None
         self.task_spec: Dict[str, Any] = {}
+        self.representation_spec: Optional[RepresentationSpec] = None
         self.loaded_model_path = self.model_path
 
         self._load_model()
         self._load_tokenizer()
         self.task_spec = _load_task_spec(self.model_path, self.loaded_model_path)
+        self.representation_spec = _representation_from_task_spec(self.task_spec)
 
     def log(self, message: str) -> None:
         if self.verbose:
@@ -333,24 +382,36 @@ class CalcGPT:
             right = int(right_text)
             display_problem = f"{left_text}{operator}{right_text}="
 
-            if self.task_spec["format"] == "padded-reversed":
-                width = self.task_spec["operand_width"]
-                limit = 10**width
-                if left >= limit or right >= limit:
-                    raise ValueError(f"Operands must be smaller than {limit:,} for this model")
-                if operator == "-" and left < right and not self.task_spec["negative_results"]:
-                    raise ValueError("This model does not support negative subtraction results")
-                model_prompt = f"{left:0{width}d}{operator}{right:0{width}d}="
+            if operator not in self.task_spec["operators"]:
+                supported = ", ".join(self.task_spec["operators"])
+                raise ValueError(
+                    f"Operator {operator!r} is not supported by this model; "
+                    f"supported operators: {supported}"
+                )
+            if operator == "-" and left < right and not self.task_spec["negative_results"]:
+                raise ValueError("This model does not support negative subtraction results")
+
+            if self.representation_spec is not None:
+                encoded_equation = self.representation_spec.format_task(
+                    (left, operator, right)
+                )
+                model_prompt = encoded_equation.split("=", 1)[0] + "="
                 max_new_tokens = min(
-                    self.config.max_tokens, self.task_spec["answer_width"]
+                    self.config.max_tokens,
+                    self.representation_spec.answer_width or self.config.max_tokens,
                 )
             else:
+                # Legacy plain artifacts did not record a domain width.
                 model_prompt = display_problem
                 max_new_tokens = self.config.max_tokens
 
             input_tokens = self.tokenizer.encode(model_prompt, add_eos=False)
             if not input_tokens:
                 raise ValueError("Problem produced no input tokens")
+            remaining_training_length = self.tokenizer.max_length - len(input_tokens)
+            if remaining_training_length < 1:
+                raise ValueError("Problem leaves no room for a generated answer")
+            max_new_tokens = min(max_new_tokens, remaining_training_length)
             self._validate_context(len(input_tokens), max_new_tokens)
             input_ids = torch.tensor([input_tokens], dtype=torch.long, device=self.device)
 
@@ -376,10 +437,20 @@ class CalcGPT:
                 full_result.split("=", 1)[1].strip() if "=" in full_result else answer_part
             )
             numerical_answer = encoded_answer
-            if self.task_spec["answer_order"] == "reversed":
-                if not encoded_answer.isdigit():
-                    raise ValueError("Model emitted a non-numeric reversed answer")
+            answer_order = (
+                self.representation_spec.answer_order
+                if self.representation_spec is not None
+                else self.task_spec["answer_order"]
+            )
+            if not encoded_answer.isdigit():
+                raise ValueError("Model emitted a non-numeric answer")
+            if answer_order == "reversed":
                 numerical_answer = str(int(encoded_answer[::-1]))
+            elif (
+                self.representation_spec is not None
+                and self.representation_spec.layout == "fixed"
+            ):
+                numerical_answer = str(int(encoded_answer))
             return {
                 "problem": display_problem,
                 "model_prompt": model_prompt,
@@ -391,7 +462,11 @@ class CalcGPT:
                 "is_correct": validate_simple_arithmetic(display_problem, numerical_answer),
                 "model_path": str(self.loaded_model_path),
                 "device": str(self.device),
-                "task_format": self.task_spec["format"],
+                "task_format": (
+                    self.representation_spec.name
+                    if self.representation_spec is not None
+                    else self.task_spec["format"]
+                ),
             }
         except Exception as exc:
             return {
