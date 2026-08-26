@@ -104,8 +104,42 @@ for weak baseline runs or mixed into their summary.
 Any later RL experiment needs a separate, predeclared reward, optimization,
 stopping, seed, and failure-reporting protocol. The supervised baseline artifacts
 stay frozen, and the benchmark manifest remains evaluation-only rather than a
-reward-selection signal. Until that protocol exists, RL is a future study, not a
-current CalcGPT capability claim.
+reward-selection signal.
+
+The smallest useful follow-up is a three-arm continuation study, declared before
+inspecting the ablation winner:
+
+1. use the padded-reversed representation with seeds 41, 42, and 43 from its
+   frozen supervised checkpoints;
+2. compare the frozen checkpoint, an equal-compute supervised continuation, and
+   a verifier-reward policy-optimization continuation;
+3. train the continuation arms on a separate roster whose semantic groups are
+   excluded from the canonical benchmark;
+4. award 1 only for an exact canonical answer followed by EOS and 0 otherwise,
+   with the KL coefficient and schedule fixed before any run;
+5. keep the 300-task canonical benchmark untouched until final evaluation, using
+   the existing exact, numerical, strict-format, EOS, throughput, and arithmetic-
+   stratum report contract; and
+6. retain failed runs and stop on predeclared verifier mismatch, reward exploit,
+   or output-distribution collapse rather than repairing the protocol mid-run.
+
+The equal-compute supervised arm is essential: without it, additional optimization
+would be confounded with reinforcement learning. Padded-reversed is named before
+the baseline result so the RL condition is not chosen post hoc. CalcGPT currently
+emits only final answers, so an outcome verifier is the natural first test; process
+reward would require a new intermediate-reasoning representation and a different
+research question.
+
+This direction is informed by [DeepSeekMath](https://arxiv.org/abs/2402.03300),
+which introduced Group Relative Policy Optimization for mathematical reasoning,
+and [DeepSeek-R1](https://arxiv.org/abs/2501.12948), which studied verifier-based
+reinforcement learning on reasoning tasks. [Let's Verify Step by
+Step](https://arxiv.org/abs/2305.20050) motivates treating process supervision as
+distinct from final-answer outcome supervision. These papers motivate the design;
+they do not imply that their large-model results transfer to CalcGPT.
+
+Until the supervised matrix is complete and this protocol is made executable, RL
+is a future study, not a current CalcGPT capability claim.
 
 ## 2026-08-27 — No model-quality result yet
 
