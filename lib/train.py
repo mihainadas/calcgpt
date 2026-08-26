@@ -4,17 +4,31 @@ CalcGPT Training Library
 Core training functionality for CalcGPT models with proper separation of concerns.
 """
 
+import hashlib
+import json
+import platform
+import random
+import subprocess
 import time
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from importlib import metadata
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from torch.utils.data import Dataset
-from transformers import GPT2Config, GPT2LMHeadModel, Trainer, TrainingArguments
-from sklearn.model_selection import train_test_split
+from transformers import (
+    GPT2Config,
+    GPT2LMHeadModel,
+    Trainer,
+    TrainingArguments,
+    set_seed,
+)
 
+from .data import augment_data, load_dataset, split_examples_grouped
 from .tokenizer import CalcGPTTokenizer
+from .version import __version__
 
 
 @dataclass
@@ -34,7 +48,17 @@ class TrainingConfig:
     seed: int = 42
     no_augmentation: bool = False
     n_positions: Optional[int] = None  # explicit context window; defaults to maxlen+10
+    task_format: str = "plain"
+    operand_width: Optional[int] = None
 
+
+def seed_everything(seed: int) -> None:
+    """Seed Python and PyTorch before model and dataset construction."""
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    set_seed(seed)
 
 def detect_device() -> Tuple[str, bool]:
     """Detect the best available training device
@@ -50,79 +74,35 @@ def detect_device() -> Tuple[str, bool]:
         return 'cpu', False
 
 
-def load_dataset(dataset_path: Path) -> List[str]:
-    """Load training dataset from file
-    
-    Args:
-        dataset_path: Path to dataset file
-        
-    Returns:
-        List of training examples
-        
-    Raises:
-        FileNotFoundError: If dataset file doesn't exist
-        ValueError: If dataset is empty
-    """
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
-    
-    with open(dataset_path, 'r', encoding='utf-8') as f:
-        examples = [line.strip() for line in f if line.strip()]
-    
-    if not examples:
-        raise ValueError("Dataset is empty")
-    
-    return examples
-
-
-def augment_data(examples: List[str]) -> List[str]:
-    """Generate additional training examples through commutative property
-    
-    Args:
-        examples: Original training examples
-        
-    Returns:
-        Augmented dataset with commutative examples added
-    """
-    augmented = examples.copy()
-    added_count = 0
-    
-    for example in examples:
-        if '+' in example and '=' in example:
-            parts = example.split('=')
-            if '+' in parts[0]:
-                operands = parts[0].split('+')
-                if len(operands) == 2:
-                    reversed_expr = f"{operands[1]}+{operands[0]}={parts[1]}"
-                    if reversed_expr not in augmented:
-                        augmented.append(reversed_expr)
-                        added_count += 1
-    
-    return augmented
-
-
-
-
-
 class OptimizedDataset(Dataset):
     """Pre-tokenized dataset for faster training"""
     
     def __init__(self, data: List[str], maxlen: int, tokenizer: CalcGPTTokenizer):
         self.tokenizer = tokenizer
-        self.data = []
+        self.data: List[Dict[str, List[int]]] = []
         
         for example in data:
             encoded = tokenizer.encode(example, add_eos=True)
+            if len(encoded) > maxlen:
+                raise ValueError(f"encoded example exceeds maxlen={maxlen}: {example!r}")
             padded = encoded + [tokenizer.pad_token_id] * (maxlen - len(encoded))
-            self.data.append(padded)
+            attention_mask = [1] * len(encoded) + [0] * (maxlen - len(encoded))
+            labels = encoded + [-100] * (maxlen - len(encoded))
+            self.data.append(
+                {
+                    "input_ids": padded,
+                    "attention_mask": attention_mask,
+                    "labels": labels,
+                }
+            )
     
     def __len__(self) -> int:
         return len(self.data)
     
     def __getitem__(self, i: int) -> Dict[str, torch.Tensor]:
         return {
-            'input_ids': torch.tensor(self.data[i]), 
-            'labels': torch.tensor(self.data[i])
+            key: torch.tensor(value, dtype=torch.long)
+            for key, value in self.data[i].items()
         }
 
 
@@ -178,6 +158,8 @@ class CalcGPTTrainer:
         self.tokenizer = None
         self.model = None
         self.trainer = None
+        self.train_examples: List[str] = []
+        self.validation_examples: List[str] = []
         
     def log(self, message: str):
         """Log message if verbose mode is enabled"""
@@ -189,15 +171,6 @@ class CalcGPTTrainer:
         self.log(f"Loading dataset from: {self.dataset_path}")
         self.examples = load_dataset(self.dataset_path)
         self.log(f"Loaded {len(self.examples)} examples")
-        
-        # Apply data augmentation if enabled
-        if not self.config.no_augmentation:
-            original_count = len(self.examples)
-            self.examples = augment_data(self.examples)
-            added = len(self.examples) - original_count
-            self.log(f"Added {added} augmented examples (total: {len(self.examples)})")
-        else:
-            self.log("Data augmentation disabled")
         
         # Create tokenizer
         self.tokenizer = CalcGPTTokenizer(self.examples)
@@ -213,23 +186,28 @@ class CalcGPTTrainer:
         Returns:
             Tuple of (train_dataset, val_dataset)
         """
-        if self.config.test_split > 0:
-            train_examples, val_examples = train_test_split(
-                self.examples, 
-                test_size=self.config.test_split, 
-                random_state=self.config.seed, 
-                shuffle=True
-            )
-            self.log(f"Training examples: {len(train_examples)}")
-            self.log(f"Validation examples: {len(val_examples)}")
-            
-            train_dataset = OptimizedDataset(train_examples, self.maxlen, self.tokenizer)
-            val_dataset = OptimizedDataset(val_examples, self.maxlen, self.tokenizer)
-            return train_dataset, val_dataset
+        train_examples, val_examples = split_examples_grouped(
+            self.examples, self.config.test_split, self.config.seed
+        )
+        if not self.config.no_augmentation:
+            original_count = len(train_examples)
+            train_examples = augment_data(train_examples)
+            added = len(train_examples) - original_count
+            self.log(f"Added {added} training-only augmented examples")
         else:
-            self.log("No validation split")
-            train_dataset = OptimizedDataset(self.examples, self.maxlen, self.tokenizer)
-            return train_dataset, None
+            self.log("Data augmentation disabled")
+
+        self.train_examples = train_examples
+        self.validation_examples = val_examples
+        self.log(f"Training examples: {len(train_examples)}")
+        self.log(f"Validation examples: {len(val_examples)}")
+        train_dataset = OptimizedDataset(train_examples, self.maxlen, self.tokenizer)
+        val_dataset = (
+            OptimizedDataset(val_examples, self.maxlen, self.tokenizer)
+            if val_examples
+            else None
+        )
+        return train_dataset, val_dataset
     
     def create_model(self) -> GPT2LMHeadModel:
         """Create and configure the model
@@ -277,7 +255,9 @@ class CalcGPTTrainer:
             dataloader_num_workers=0,
             remove_unused_columns=False,
             seed=self.config.seed,
-            report_to=[]
+            report_to=[],
+            save_total_limit=2,
+            save_safetensors=True,
         )
         
         trainer = Trainer(
@@ -298,7 +278,19 @@ class CalcGPTTrainer:
         """
         self.log("\n=== QUICK TEST ===")
         self.model.eval()
-        test_prompts = ["1+1=", "2+3=", "5+0="]
+        if self.config.task_format == "padded-reversed":
+            width = self.config.operand_width or 1
+            test_prompts = [
+                f"{left:0{width}d}+{right:0{width}d}="
+                for left, right in ((1, 1), (2, 3), (5, 0))
+            ]
+        else:
+            test_prompts = ["1+1=", "2+3=", "5+0="]
+        quick_test_tokens = (
+            (self.config.operand_width or 1) + 1
+            if self.config.task_format == "padded-reversed"
+            else 5
+        )
         results = {}
         
         with torch.no_grad():
@@ -309,7 +301,7 @@ class CalcGPTTrainer:
                     
                     output = self.model.generate(
                         input_ids,
-                        max_length=len(input_tokens) + 5,
+                        max_new_tokens=quick_test_tokens,
                         do_sample=False,
                         pad_token_id=self.tokenizer.pad_token_id,
                         eos_token_id=self.tokenizer.eos_token_id
@@ -327,7 +319,88 @@ class CalcGPTTrainer:
         
         return results
     
-    def train(self) -> Dict[str, any]:
+    def _write_training_manifest(
+        self, training_time: float, training_loss: float, eval_loss: Optional[float]
+    ) -> None:
+        """Write provenance required to reproduce and audit a model artifact."""
+        dataset_bytes = self.dataset_path.read_bytes()
+        try:
+            git_commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            git_commit = None
+
+        def package_version(name: str) -> Optional[str]:
+            try:
+                return metadata.version(name)
+            except metadata.PackageNotFoundError:
+                return None
+
+        def examples_hash(examples: List[str]) -> str:
+            payload = ("\n".join(examples) + "\n").encode("utf-8")
+            return hashlib.sha256(payload).hexdigest()
+
+        task_spec = {
+            "schema_version": 1,
+            "format": self.config.task_format,
+            "operand_width": self.config.operand_width,
+            "answer_order": (
+                "reversed"
+                if self.config.task_format == "padded-reversed"
+                else "normal"
+            ),
+            "answer_width": (
+                self.config.operand_width + 1
+                if self.config.operand_width is not None
+                else None
+            ),
+            "operators": ["+", "-"],
+            "negative_results": False,
+        }
+        (self.output_dir / "task_spec.json").write_text(
+            json.dumps(task_spec, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        manifest = {
+            "schema_version": 1,
+            "calcgpt_version": __version__,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "git_commit": git_commit,
+            "dataset": {
+                "path": str(self.dataset_path),
+                "sha256": hashlib.sha256(dataset_bytes).hexdigest(),
+                "examples": len(self.examples),
+            },
+            "splits": {
+                "train_examples": len(self.train_examples),
+                "validation_examples": len(self.validation_examples),
+                "train_sha256": examples_hash(self.train_examples),
+                "validation_sha256": examples_hash(self.validation_examples),
+                "grouped_by_commutative_equivalence": True,
+            },
+            "task_spec": task_spec,
+            "training_config": asdict(self.config),
+            "results": {
+                "training_loss": training_loss,
+                "validation_loss": eval_loss,
+                "training_seconds": training_time,
+            },
+            "environment": {
+                "python": platform.python_version(),
+                "torch": package_version("torch"),
+                "transformers": package_version("transformers"),
+                "platform": platform.platform(),
+                "device": self.device,
+            },
+        }
+        manifest_path = self.output_dir / "training_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    def train(self) -> Dict[str, Any]:
         """Run the complete training process
         
         Returns:
@@ -335,8 +408,9 @@ class CalcGPTTrainer:
         """
         start_time = time.time()
         
-        self.log(f"=== CalcGPT Training ===")
+        self.log("=== CalcGPT Training ===")
         self.log(f"Device: {self.device} (fp16: {self.use_fp16})")
+        seed_everything(self.config.seed)
         
         # Load and prepare data
         self.load_and_prepare_data()
@@ -369,6 +443,10 @@ class CalcGPTTrainer:
         
         # Persist the final model so it is always loadable, regardless of save_steps
         self.trainer.save_model(str(self.output_dir))
+        self.tokenizer.save_pretrained(self.output_dir)
+        self._write_training_manifest(
+            training_time, training_result.training_loss, eval_loss
+        )
 
         # Quick test
         test_results = self.run_quick_test()
@@ -382,6 +460,8 @@ class CalcGPTTrainer:
             'training_time': training_time,
             'vocab_size': self.tokenizer.vocab_size,
             'dataset_size': len(self.examples),
+            'training_examples': len(self.train_examples),
+            'validation_examples': len(self.validation_examples),
             'test_results': test_results,
             'model_params': sum(p.numel() for p in self.model.parameters())
-        } 
+        }

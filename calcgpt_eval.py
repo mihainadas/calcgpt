@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
-"""
-CalcGPT Evaluation Tool - CLI Interface
+"""CalcGPT Evaluation Tool - CLI Interface.
 
 A command-line interface for evaluating CalcGPT models on arithmetic tasks.
 Provides detailed accuracy metrics, completion analysis, and performance benchmarks.
 
 Author: Mihai NADAS
-Version: 2.0.0
 """
 
-import argparse
-import sys
-import json
-from pathlib import Path
-from datetime import datetime
-from typing import List, Dict, Any
+from __future__ import annotations
 
-from lib.evaluation import CalcGPTEvaluator, EvaluationConfig
-from lib.inference import get_model_path
+import argparse
+import json
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List
+
+from lib.version import __version__
+
+if TYPE_CHECKING:
+    from lib.evaluation import CalcGPTEvaluator
 
 # ANSI color codes for beautiful output
 class Colors:
@@ -38,18 +40,21 @@ def print_banner():
 ╔═══════════════════════════════════════════════════════════════╗
 ║                        CalcGPT Eval                           ║
 ║                   Model Evaluation Tool                       ║
-║                         v2.0.0                                ║
+║{f'v{__version__}':^63}║
 ╚═══════════════════════════════════════════════════════════════╝
 {Colors.ENDC}"""
     print(banner)
 
-def create_config_from_args(args) -> EvaluationConfig:
+def create_config_from_args(args):
     """Create EvaluationConfig from command line arguments"""
+    from lib.evaluation import EvaluationConfig
+
     return EvaluationConfig(
         max_tokens=args.max_tokens,
         device=args.device,
         sample_size=args.sample,
-        verbose=args.verbose
+        verbose=args.verbose,
+        sample_seed=args.seed,
     )
 
 def run_evaluation_with_progress(evaluator: CalcGPTEvaluator, test_cases: List[Dict[str, str]], 
@@ -131,7 +136,7 @@ def save_results(results: List[Dict[str, Any]], metrics: Dict[str, Any],
             'model_path': model_path,
             'evaluation_timestamp': datetime.now().isoformat(),
             'total_test_cases': len(results),
-            'evaluator_version': '2.0.0'
+            'evaluator_version': __version__
         },
         'metrics': metrics,
         'detailed_results': results
@@ -162,6 +167,10 @@ Examples:
     # Model options
     parser.add_argument('-m', '--model', default='auto',
                        help='Path to model directory (default: auto-detect latest model)')
+    parser.add_argument(
+        '--legacy-dataset',
+        help='Exact training dataset used to migrate a legacy model without tokenizer.json',
+    )
     parser.add_argument('--device', default='auto', 
                        choices=['auto', 'cuda', 'mps', 'cpu'],
                        help='Device to use for inference (default: auto)')
@@ -170,7 +179,9 @@ Examples:
     parser.add_argument('-d', '--dataset', default='datasets/ds-calcgpt.txt',
                        help='Path to evaluation dataset (default: datasets/ds-calcgpt.txt)')
     parser.add_argument('--sample', type=int,
-                       help='Evaluate on random sample of N test cases')
+                       help='Evaluate a deterministic sample of N source equations')
+    parser.add_argument('--seed', type=int, default=42,
+                       help='Deterministic evaluation sample seed (default: 42)')
     
     # Generation parameters
     parser.add_argument('--max-tokens', type=int, default=15,
@@ -185,11 +196,19 @@ Examples:
     # Utility options
     parser.add_argument('-v', '--verbose', action='store_true',
                        help='Enable verbose output with individual test results')
-    parser.add_argument('--version', action='version', version='CalcGPT Eval 2.0.0')
+    parser.add_argument('--version', action='version', version=f'CalcGPT Eval {__version__}')
     parser.add_argument('--quiet', action='store_true',
                        help='Suppress banner and verbose output')
     
     args = parser.parse_args()
+
+    if args.sample is not None and args.sample < 1:
+        parser.error("sample must be positive")
+    if args.max_tokens < 1:
+        parser.error("max-tokens must be positive")
+
+    from lib.evaluation import CalcGPTEvaluator
+    from lib.inference import get_model_path
     
     # Print banner unless suppressed
     if not args.quiet:
@@ -216,7 +235,12 @@ Examples:
         print(f"{Colors.CYAN}Initializing CalcGPT evaluator...{Colors.ENDC}")
     
     try:
-        evaluator = CalcGPTEvaluator(model_path, config, verbose=not args.quiet)
+        evaluator = CalcGPTEvaluator(
+            model_path,
+            config,
+            verbose=not args.quiet,
+            legacy_dataset_path=args.legacy_dataset,
+        )
     except Exception as e:
         print(f"{Colors.FAIL}❌ Error initializing evaluator: {e}{Colors.ENDC}")
         return 1
@@ -235,7 +259,10 @@ Examples:
             print(f"{Colors.GREEN}✅ Generated {metrics['total_tests']} test cases{Colors.ENDC}")
             
             if config.sample_size:
-                print(f"{Colors.WARNING}📝 Using random sample of {metrics['total_tests']} test cases{Colors.ENDC}")
+                print(
+                    f"{Colors.WARNING}📝 Sampled {equations_count} source equations "
+                    f"with seed {config.sample_seed}{Colors.ENDC}"
+                )
         
     except Exception as e:
         print(f"{Colors.FAIL}❌ Error during evaluation: {e}{Colors.ENDC}")
@@ -259,4 +286,4 @@ Examples:
         return 0
 
 if __name__ == "__main__":
-    sys.exit(main()) 
+    sys.exit(main())

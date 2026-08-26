@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-CalcGPT Live Demo — a small transformer that *generalizes* arithmetic
-across the full 7-digit range, despite seeing only 40k of the 10^14
-possible (a, b) pairs.
+CalcGPT Live Demo — a small transformer evaluated on held-out arithmetic
+tasks within its configured fixed-width operand range.
 
 Trick: zero-pad operands to a fixed width and reverse the answer
 ("0000007+0000008=51000000").  Every digit lives at a fixed position,
@@ -14,8 +13,8 @@ matching the natural carry direction.
 Stages:
   1. Banner + architecture
   2. Token-by-token live generation
-  3. Accuracy by magnitude — uniform across 1-to-7-digit problems
-  4. Held-out unseen-pair verification
+  3. Accuracy by magnitude on tasks absent from the training dataset
+  4. Held-out task verification
   5. Head-to-head against the old in-distribution-only model
   6. Top-k probabilities for one step
   7. Interactive REPL
@@ -23,7 +22,6 @@ Stages:
 
 from __future__ import annotations
 
-import random
 import sys
 import time
 from pathlib import Path
@@ -44,6 +42,11 @@ from rich.table import Table
 from rich.text import Text
 from transformers import GPT2LMHeadModel
 
+from lib.benchmark import (
+    load_examples,
+    sample_heldout_by_magnitude,
+    task_space_size,
+)
 from lib.tokenizer import CalcGPTTokenizer
 
 console = Console()
@@ -55,13 +58,13 @@ BANNER = r"""
  | |__| (_| | | (__| |_| |  __/ | |
   \____\__,_|_|\___|\____|_|    |_|
 
-  a transformer that learned arithmetic — and generalizes
+  a transformer evaluated on explicitly held-out arithmetic tasks
 """
 
 V2_MODEL = Path("models/calcgpt-padded")
 V2_DATASET = Path("datasets/ds-calcgpt-padded.txt")
 V1_MODEL = Path("models/calcgpt-demo")
-V1_DATASET = Path("datasets/ds-calcgpt_min0_max100_alldigits_allops.txt")
+V1_DATASET = Path("datasets/ds-calcgpt.txt")
 
 # Must match the operand-width used by scripts/gen_padded.py
 OPERAND_WIDTH = 3
@@ -114,7 +117,7 @@ def architecture_panel(
     table.add_row("parameters", f"{total_params:,}  ({size_mb:.2f} MB)")
     table.add_row(
         "training",
-        f"40k random pairs from {10**OPERAND_WIDTH:,}² possibilities, "
+        f"40k sampled tasks from {task_space_size(OPERAND_WIDTH):,}, "
         f"answer reversed",
     )
     return Panel(table, title="[bold]model architecture[/]", border_style="cyan")
@@ -248,20 +251,16 @@ def stage_live_generation(
         console.print()
 
 
-def sample_pairs_by_magnitude(per_bucket: int, max_digits: int, seed: int = 0) -> List[Tuple[int, int, int, str]]:
-    rng = random.Random(seed)
-    out: List[Tuple[int, int, int, str]] = []
-    for d in range(1, max_digits + 1):
-        lo = 0 if d == 1 else 10 ** (d - 1)
-        hi = 10 ** d - 1
-        for _ in range(per_bucket):
-            a = rng.randint(lo, hi)
-            b = rng.randint(lo, hi)
-            op = rng.choice(["+", "-"])
-            if op == "-" and a < b:
-                a, b = b, a
-            out.append((d, a, b, op))
-    return out
+def sample_pairs_by_magnitude(
+    per_bucket: int,
+    max_digits: int,
+    excluded_examples: List[str],
+    seed: int = 0,
+) -> List[Tuple[int, int, int, str]]:
+    """Return unique tasks that are exactly absent from the provided dataset."""
+    return sample_heldout_by_magnitude(
+        per_bucket, max_digits, excluded_examples, seed
+    )
 
 
 def stage_scaling(
@@ -275,9 +274,9 @@ def stage_scaling(
         style="cyan",
     )
     console.print(
-        f"[dim]{per_bucket} random unseen pairs per digit-count bucket. "
-        f"The model only ever saw 40k random pairs during training — "
-        f"any specific one of these is almost certainly new.[/dim]\n"
+        f"[dim]{per_bucket} unique held-out tasks per digit-count bucket. "
+        f"Every task is checked against {V2_DATASET.name} and included only "
+        f"when absent.[/dim]\n"
     )
 
     table = Table(box=None, padding=(0, 2))
@@ -287,16 +286,19 @@ def stage_scaling(
     table.add_column("avg ms", justify="right", style="dim", width=7)
     table.add_column("samples", justify="right", style="dim", width=8)
 
+    excluded_examples = load_examples(V2_DATASET)
+    problems = sample_pairs_by_magnitude(
+        per_bucket, OPERAND_WIDTH, excluded_examples, seed=0
+    )
+
     with Live(table, console=console, refresh_per_second=8) as live:
         for d in range(1, OPERAND_WIDTH + 1):
             lo = 0 if d == 1 else 10 ** (d - 1)
             hi = 10 ** d - 1
-            problems = sample_pairs_by_magnitude(per_bucket, d, seed=d)
-            # Filter to just this bucket
-            problems = [p for p in problems if p[0] == d]
+            bucket_problems = [p for p in problems if p[0] == d]
             correct = 0
             total_latency = 0.0
-            for _, a, b, op in problems:
+            for _, a, b, op in bucket_problems:
                 prompt = pad_prompt(a, op, b)
                 raw, latency = greedy_predict(
                     model, tokenizer, device, prompt, ANSWER_WIDTH
@@ -333,8 +335,8 @@ def stage_v1_vs_v2(
     console.print(
         "[dim]The old model was trained on operands 0–100 with plain "
         "left-to-right answers.  It memorized that table and falls off "
-        "a cliff above 100.  The new model — zero-padded operands, "
-        "reversed answer — actually generalizes.[/dim]\n"
+        "a cliff above 100.  The new model uses zero-padded operands and "
+        "a reversed answer, and is tested on explicit held-out tasks.[/dim]\n"
     )
 
     problems = [
@@ -386,7 +388,7 @@ def stage_topk(
     b: int = 365,
 ) -> None:
     prompt = pad_prompt(a, "+", b)
-    expected = a + b  # 80235
+    expected = a + b
     rev = str(expected).zfill(ANSWER_WIDTH)
     expected_units = rev[-1]
     console.rule("[bold cyan]what is the model thinking?", style="cyan")
@@ -450,7 +452,7 @@ def stage_interactive(
     console.rule("[bold cyan]your turn", style="cyan")
     console.print(
         f"[dim]Type any arithmetic problem with operands up to "
-        f"{max_v:,} (e.g. [bold]1234567+7654321[/bold]). "
+        f"{max_v:,} (e.g. [bold]123+456[/bold]). "
         f"Empty input or 'q' to quit.[/dim]\n"
     )
     while True:

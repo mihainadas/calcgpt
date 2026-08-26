@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate an arithmetic dataset for length-generalization via fixed-width
+Generate an arithmetic dataset for within-width generalization via fixed-width
 zero-padding and a reversed answer.
 
 Why this format generalizes
@@ -22,22 +22,54 @@ every digit lives at a fixed position from left to right:
    position 8   millions of operand B
    ...
 
-The model learns ONE algorithm — add digit at position p_A to digit at
-position p_B with carry — and applies it everywhere.  Because every
-randomly sampled (a, b) pair in the training set drives the same circuit,
-the model interpolates over the entire numerical range, not over a table
-of seen pairs.
+This representation makes a reusable digit-and-carry procedure easier to
+learn and allows exact held-out evaluation across the configured range.
 
 Reversing the answer lets the decoder emit units first (carries flow
 naturally left to right in the output sequence).
 """
 
 import argparse
+import math
 import random
 from pathlib import Path
 
 
+def task_space_size(operand_width: int) -> int:
+    """Return the number of distinct addition and nonnegative-subtraction tasks."""
+    if operand_width <= 0:
+        raise ValueError("operand_width must be positive")
+    operand_count = 10 ** operand_width
+    additions = operand_count * operand_count
+    subtractions = operand_count * (operand_count + 1) // 2
+    return additions + subtractions
+
+
+def _task_from_id(task_id: int, operand_width: int) -> tuple[int, int, str]:
+    """Map a dense task ID to one task without materializing the task space."""
+    operand_count = 10 ** operand_width
+    additions = operand_count * operand_count
+    if task_id < additions:
+        return task_id // operand_count, task_id % operand_count, "+"
+
+    # Subtraction rows have lengths 1, 2, ..., operand_count for a=0,1,...
+    subtraction_id = task_id - additions
+    a = (math.isqrt(8 * subtraction_id + 1) - 1) // 2
+    row_start = a * (a + 1) // 2
+    b = subtraction_id - row_start
+    return a, b, "-"
+
+
 def format_example(a: int, b: int, op: str, operand_width: int, answer_width: int) -> str:
+    if operand_width <= 0 or answer_width <= 0:
+        raise ValueError("operand_width and answer_width must be positive")
+    if op not in {"+", "-"}:
+        raise ValueError("op must be '+' or '-'")
+    limit = 10 ** operand_width
+    if not (0 <= a < limit and 0 <= b < limit):
+        raise ValueError("operands must be nonnegative and fit operand_width")
+    if op == "-" and a < b:
+        raise ValueError("subtraction tasks must have a >= b")
     if op == "+":
         r = a + b
     else:
@@ -51,21 +83,24 @@ def format_example(a: int, b: int, op: str, operand_width: int, answer_width: in
 def sample_examples(
     n: int, operand_width: int, seed: int
 ) -> list[str]:
+    if n <= 0:
+        raise ValueError("n must be positive")
+    capacity = task_space_size(operand_width)
+    if n > capacity:
+        raise ValueError(
+            f"requested {n:,} examples, but width {operand_width} has "
+            f"only {capacity:,} distinct tasks"
+        )
+
     rng = random.Random(seed)
-    lo = 0
-    hi = 10 ** operand_width - 1
-    answer_width = operand_width + 1  # max sum is 2*hi which has at most width+1 digits
-    out: set[str] = set()
-    while len(out) < n:
-        a = rng.randint(lo, hi)
-        b = rng.randint(lo, hi)
-        op = rng.choice(["+", "-"])
-        if op == "-" and a < b:
-            a, b = b, a
-        out.add(format_example(a, b, op, operand_width, answer_width))
-    examples = list(out)
-    rng.shuffle(examples)
-    return examples
+    # The largest sum has at most one more digit than either operand.
+    answer_width = operand_width + 1
+    task_ids = rng.sample(range(capacity), n)
+    return [
+        format_example(a, b, op, operand_width, answer_width)
+        for task_id in task_ids
+        for a, b, op in [_task_from_id(task_id, operand_width)]
+    ]
 
 
 def main() -> int:
@@ -87,16 +122,21 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
+    try:
+        examples = sample_examples(args.num_examples, args.operand_width, args.seed)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    examples = sample_examples(args.num_examples, args.operand_width, args.seed)
 
     with args.output.open("w") as f:
         f.write("\n".join(examples) + "\n")
 
     print(f"wrote {len(examples):,} examples -> {args.output}")
     print(f"operand width: {args.operand_width} digits  (max value {10**args.operand_width - 1:,})")
+    print(f"task space: {task_space_size(args.operand_width):,} distinct tasks")
     print(f"sequence length: {len(examples[0])} characters")
-    print(f"first 5 samples:")
+    print("first 5 samples:")
     for ex in examples[:5]:
         print(f"  {ex}")
     return 0

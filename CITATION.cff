@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use CalcGPT in research or teaching, please cite this software."
+title: "CalcGPT"
+type: software
+authors:
+  - family-names: "Nadas"
+    given-names: "Mihai"
+repository-code: "https://github.com/mihainadas/calcgpt"
+url: "https://github.com/mihainadas/calcgpt"
+license: MIT
+version: 3.0.0
+keywords:
+  - arithmetic
+  - language model
+  - transformer
+  - GPT-2
